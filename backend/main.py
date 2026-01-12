@@ -1,19 +1,44 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import joblib
 import numpy as np
 import os
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+import uuid
+import time
 
-# Load model
+# ---------------- CONFIG ----------------
+
+JWT_SECRET = "super-secret-change-this"
+JWT_ALGO = "HS256"
+
+security = HTTPBearer()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# In-memory user store (TEMP, will move to DB later)
+USERS = {}  # email -> {hashed_password, brokerage_id}
+
+# ---------------- LOAD MODEL ----------------
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "lead_scorer_v1.pkl")
 model = joblib.load(MODEL_PATH)
 
-app = FastAPI(
-    title="Real Estate Lead Scorer",
-    version="1.0.0"
-)
+# ---------------- APP ----------------
 
-# --------- Request Schema ---------
+app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
+
+# ---------------- SCHEMAS ----------------
+
+class RegisterInput(BaseModel):
+    email: str
+    password: str
+    brokerage_name: str
+
+class LoginInput(BaseModel):
+    email: str
+    password: str
 
 class LeadInput(BaseModel):
     budget: float
@@ -25,17 +50,82 @@ class LeadInput(BaseModel):
     open_house: int
     agent_response_hours: int
 
-# --------- Health ---------
+# ---------------- UTILS ----------------
+
+def hash_password(p: str) -> str:
+    return pwd_context.hash(p)
+
+def verify_password(p: str, h: str) -> bool:
+    return pwd_context.verify(p, h)
+
+def create_jwt(brokerage_id: str, email: str):
+    payload = {
+        "sub": email,
+        "brokerage_id": brokerage_id,
+        "iat": int(time.time())
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
+    token = creds.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# ---------------- ROUTES ----------------
 
 @app.get("/")
 def health():
     return {"status": "ok"}
 
-# --------- Scoring Endpoint ---------
+# -------- AUTH --------
+
+@app.post("/auth/register-brokerage")
+def register(data: RegisterInput):
+    if data.email in USERS:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    brokerage_id = str(uuid.uuid4())
+
+    USERS[data.email] = {
+        "hashed_password": hash_password(data.password),
+        "brokerage_id": brokerage_id,
+        "brokerage_name": data.brokerage_name
+    }
+
+    token = create_jwt(brokerage_id, data.email)
+
+    return {
+        "message": "Brokerage registered",
+        "brokerage_id": brokerage_id,
+        "access_token": token
+    }
+
+@app.post("/auth/login")
+def login(data: LoginInput):
+    user = USERS.get(data.email)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(data.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_jwt(user["brokerage_id"], data.email)
+
+    return {
+        "access_token": token
+    }
+
+# -------- PROTECTED SCORING --------
 
 @app.post("/leads/score")
-def score_lead(lead: LeadInput):
-    # Feature engineering (must match training)
+def score_lead(lead: LeadInput, user=Depends(get_current_user)):
+    # We now HAVE tenant info
+    brokerage_id = user["brokerage_id"]
+
+    # Feature engineering
     buyer_readiness_score = (
         (1 if lead.budget >= 500000 else 0) * 30 +
         (1 if lead.urgency <= 30 else 0) * 30 +
@@ -50,7 +140,6 @@ def score_lead(lead: LeadInput):
 
     speed_penalty = min(max(lead.agent_response_hours, 0), 72) / 72.0 * 100
 
-    # Final feature vector (ORDER MUST MATCH TRAINING)
     X = np.array([[
         lead.budget,
         lead.urgency,
@@ -65,10 +154,7 @@ def score_lead(lead: LeadInput):
         speed_penalty
     ]])
 
-    # Predict probability
     prob = model.predict_proba(X)[0][1]
-
-    # Convert to 0–100 score
     score = int(prob * 100)
 
     if score >= 70:
@@ -79,6 +165,7 @@ def score_lead(lead: LeadInput):
         bucket = "COLD"
 
     return {
+        "brokerage_id": brokerage_id,
         "score": score,
         "bucket": bucket,
         "probability": float(prob)
