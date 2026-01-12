@@ -123,7 +123,7 @@ def health():
 # -------- AUTH --------
 
 @app.post("/auth/register-brokerage")
-@limiter.limit("10/minute")
+@limiter.limit("2/minute")
 def register(request: Request, data: RegisterInput):
     if data.email in USERS:
         raise HTTPException(status_code=400, detail="User already exists")
@@ -145,7 +145,7 @@ def register(request: Request, data: RegisterInput):
     }
 
 @app.post("/auth/login")
-@limiter.limit("20/minute")
+@limiter.limit("2/minute")
 def login(request: Request, data: LoginInput):
     user = USERS.get(data.email)
     if not user:
@@ -163,7 +163,7 @@ def login(request: Request, data: LoginInput):
 # -------- PROTECTED SCORING --------
 
 @app.post("/leads/score")
-@limiter.limit("100/minute")
+@limiter.limit("5/minute")
 def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)):
     brokerage_id = user["brokerage_id"]
 
