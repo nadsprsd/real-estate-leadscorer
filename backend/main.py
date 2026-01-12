@@ -1,8 +1,9 @@
+import logging
+from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
 import joblib
 import numpy as np
 import os
@@ -36,6 +37,18 @@ model = joblib.load(MODEL_PATH)
 # ---------------- APP ----------------
 
 app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
+
+
+# ---------------- AUDIT LOGGER ----------------
+
+LOG_PATH = os.path.join(os.path.dirname(__file__), "audit.log")
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s | %(message)s",
+)
+
 
 # ---------------- RATE LIMITER SETUP ----------------
 
@@ -205,6 +218,14 @@ def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)
         bucket = "WARM"
     else:
         bucket = "COLD"
+
+        # -------- AUDIT LOG --------
+    logging.info(
+        f"brokerage_id={brokerage_id} | user={user['sub']} | "
+        f"budget={lead.budget} urgency={lead.urgency} views={lead.views} "
+        f"saves={lead.saves} preapproved={lead.preapproved} | "
+        f"score={score} bucket={bucket}"
+    )
 
     return {
         "brokerage_id": brokerage_id,
