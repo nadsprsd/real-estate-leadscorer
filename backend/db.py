@@ -1,13 +1,11 @@
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
+from backend.models import Base   # 👈 ADD THIS
 
 DATABASE_URL = "postgresql+psycopg2://app:password@127.0.0.1:15432/leadscorer"
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-
-Base = declarative_base()
 
 def get_db():
     db = SessionLocal()
@@ -18,6 +16,3 @@ def get_db():
 
 def set_tenant(db, brokerage_id: str):
     db.execute(text("SET app.current_brokerage_id = :bid"), {"bid": brokerage_id})
-
-
-
