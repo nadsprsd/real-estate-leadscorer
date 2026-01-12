@@ -13,6 +13,10 @@ import time
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from backend.db import get_db, set_tenant
+
 # --------- RATE LIMITING ---------
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -26,8 +30,7 @@ JWT_ALGO = "HS256"
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# In-memory user store (TEMP, will move to DB later)
-USERS = {}  # email -> {hashed_password, brokerage_id, brokerage_name}
+
 
 # ---------------- LOAD MODEL ----------------
 
@@ -119,13 +122,23 @@ def create_jwt(brokerage_id: str, email: str):
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
-def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
     token = creds.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        brokerage_id = payload["brokerage_id"]
+        email = payload["sub"]
+
+        # Set tenant for RLS
+        set_tenant(db, brokerage_id)
+
         return payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
 
 # ---------------- ROUTES ----------------
 
@@ -137,17 +150,40 @@ def health():
 
 @app.post("/auth/register-brokerage")
 @limiter.limit("10/minute")
-def register(request: Request, data: RegisterInput):
-    if data.email in USERS:
+def register(request: Request, data: RegisterInput, db: Session = Depends(get_db)):
+    # Check if user exists
+    res = db.execute(
+        text("SELECT id FROM users WHERE email = :email"),
+        {"email": data.email}
+    ).fetchone()
+
+    if res:
         raise HTTPException(status_code=400, detail="User already exists")
 
     brokerage_id = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
 
-    USERS[data.email] = {
-        "hashed_password": hash_password(data.password),
-        "brokerage_id": brokerage_id,
-        "brokerage_name": data.brokerage_name
-    }
+    # Create brokerage
+    db.execute(
+        text("INSERT INTO brokerages (id, name) VALUES (:id, :name)"),
+        {"id": brokerage_id, "name": data.brokerage_name}
+    )
+
+    # Create user
+    db.execute(
+        text("""
+        INSERT INTO users (id, email, hashed_password, brokerage_id)
+        VALUES (:id, :email, :hp, :bid)
+        """),
+        {
+            "id": user_id,
+            "email": data.email,
+            "hp": hash_password(data.password),
+            "bid": brokerage_id
+        }
+    )
+
+    db.commit()
 
     token = create_jwt(brokerage_id, data.email)
 
@@ -157,21 +193,33 @@ def register(request: Request, data: RegisterInput):
         "access_token": token
     }
 
+
 @app.post("/auth/login")
 @limiter.limit("20/minute")
-def login(request: Request, data: LoginInput):
-    user = USERS.get(data.email)
-    if not user:
+def login(request: Request, data: LoginInput, db: Session = Depends(get_db)):
+    row = db.execute(
+        text("""
+        SELECT users.hashed_password, users.brokerage_id
+        FROM users
+        WHERE email = :email
+        """),
+        {"email": data.email}
+    ).fetchone()
+
+    if not row:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not verify_password(data.password, user["hashed_password"]):
+    hashed_password, brokerage_id = row
+
+    if not verify_password(data.password, hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_jwt(user["brokerage_id"], data.email)
+    token = create_jwt(str(brokerage_id), data.email)
 
     return {
         "access_token": token
     }
+
 
 # -------- PROTECTED SCORING --------
 
