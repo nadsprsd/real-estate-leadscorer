@@ -1,13 +1,21 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
 import joblib
 import numpy as np
 import os
-from jose import jwt, JWTError
-from passlib.context import CryptContext
 import uuid
 import time
+
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+
+# --------- RATE LIMITING ---------
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # ---------------- CONFIG ----------------
 
@@ -18,7 +26,7 @@ security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # In-memory user store (TEMP, will move to DB later)
-USERS = {}  # email -> {hashed_password, brokerage_id}
+USERS = {}  # email -> {hashed_password, brokerage_id, brokerage_name}
 
 # ---------------- LOAD MODEL ----------------
 
@@ -28,6 +36,38 @@ model = joblib.load(MODEL_PATH)
 # ---------------- APP ----------------
 
 app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
+
+# ---------------- RATE LIMITER SETUP ----------------
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded"}
+    )
+
+# ---------------- SECURITY HEADERS MIDDLEWARE ----------------
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+
+    # Allow Swagger UI to load its JS/CSS
+    if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi"):
+        response.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net"
+    else:
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+
+    return response
+
 
 # ---------------- SCHEMAS ----------------
 
@@ -83,7 +123,8 @@ def health():
 # -------- AUTH --------
 
 @app.post("/auth/register-brokerage")
-def register(data: RegisterInput):
+@limiter.limit("10/minute")
+def register(request: Request, data: RegisterInput):
     if data.email in USERS:
         raise HTTPException(status_code=400, detail="User already exists")
 
@@ -104,7 +145,8 @@ def register(data: RegisterInput):
     }
 
 @app.post("/auth/login")
-def login(data: LoginInput):
+@limiter.limit("20/minute")
+def login(request: Request, data: LoginInput):
     user = USERS.get(data.email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -121,11 +163,11 @@ def login(data: LoginInput):
 # -------- PROTECTED SCORING --------
 
 @app.post("/leads/score")
-def score_lead(lead: LeadInput, user=Depends(get_current_user)):
-    # We now HAVE tenant info
+@limiter.limit("100/minute")
+def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)):
     brokerage_id = user["brokerage_id"]
 
-    # Feature engineering
+    # Feature engineering (MUST match training)
     buyer_readiness_score = (
         (1 if lead.budget >= 500000 else 0) * 30 +
         (1 if lead.urgency <= 30 else 0) * 30 +
