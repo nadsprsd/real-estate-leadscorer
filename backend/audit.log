@@ -12,3 +12,4 @@
 2026-01-12 16:20:28,311 | brokerage_id=dfe329a3-04ac-4030-84b7-59cf70d95bfa | user=agent@test.com | budget=800000.0 urgency=15 views=25 saves=5 preapproved=1 | score=76 bucket=HOT
 2026-01-12 16:20:28,818 | brokerage_id=dfe329a3-04ac-4030-84b7-59cf70d95bfa | user=agent@test.com | budget=800000.0 urgency=15 views=25 saves=5 preapproved=1 | score=76 bucket=HOT
 2026-01-13 00:50:43,760 | brokerage_id=9d0d1470-c40d-4d92-a348-39acf1c9ca83 | user=agent@test.com | budget=800000.0 urgency=15 views=25 saves=5 preapproved=1 | score=76 bucket=HOT
+2026-01-13 03:19:19,978 | brokerage_id=8694dfef-eba2-4190-85ff-c6147408a320 | user=agent1@test.com | budget=800000.0 urgency=15 views=25 saves=5 preapproved=1 | score=76 bucket=HOT
