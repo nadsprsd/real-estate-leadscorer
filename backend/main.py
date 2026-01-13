@@ -10,6 +10,8 @@ import os
 import uuid
 import time
 
+from backend.models import LeadScore
+
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
@@ -30,8 +32,6 @@ JWT_ALGO = "HS256"
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-
-
 # ---------------- LOAD MODEL ----------------
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "lead_scorer_v1.pkl")
@@ -40,7 +40,6 @@ model = joblib.load(MODEL_PATH)
 # ---------------- APP ----------------
 
 app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
-
 
 # ---------------- AUDIT LOGGER ----------------
 
@@ -52,7 +51,6 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s",
 )
 
-
 # ---------------- RATE LIMITER SETUP ----------------
 
 limiter = Limiter(key_func=get_remote_address)
@@ -60,12 +58,9 @@ app.state.limiter = limiter
 
 @app.exception_handler(RateLimitExceeded)
 def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    return JSONResponse(
-        status_code=429,
-        content={"detail": "Rate limit exceeded"}
-    )
+    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
 
-# ---------------- SECURITY HEADERS MIDDLEWARE ----------------
+# ---------------- SECURITY HEADERS ----------------
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -76,14 +71,12 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
 
-    # Allow Swagger UI to load its JS/CSS
     if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi"):
         response.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net"
     else:
         response.headers["Content-Security-Policy"] = "default-src 'self'"
 
     return response
-
 
 # ---------------- SCHEMAS ----------------
 
@@ -130,15 +123,12 @@ def get_current_user(
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         brokerage_id = payload["brokerage_id"]
-        email = payload["sub"]
 
-        # Set tenant for RLS
         set_tenant(db, brokerage_id)
-
         return payload
+
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
 
 # ---------------- ROUTES ----------------
 
@@ -151,7 +141,6 @@ def health():
 @app.post("/auth/register-brokerage")
 @limiter.limit("10/minute")
 def register(request: Request, data: RegisterInput, db: Session = Depends(get_db)):
-    # Check if user exists
     res = db.execute(
         text("SELECT id FROM users WHERE email = :email"),
         {"email": data.email}
@@ -163,13 +152,11 @@ def register(request: Request, data: RegisterInput, db: Session = Depends(get_db
     brokerage_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
 
-    # Create brokerage
     db.execute(
         text("INSERT INTO brokerages (id, name) VALUES (:id, :name)"),
         {"id": brokerage_id, "name": data.brokerage_name}
     )
 
-    # Create user
     db.execute(
         text("""
         INSERT INTO users (id, email, hashed_password, brokerage_id)
@@ -187,12 +174,7 @@ def register(request: Request, data: RegisterInput, db: Session = Depends(get_db
 
     token = create_jwt(brokerage_id, data.email)
 
-    return {
-        "message": "Brokerage registered",
-        "brokerage_id": brokerage_id,
-        "access_token": token
-    }
-
+    return {"access_token": token}
 
 @app.post("/auth/login")
 @limiter.limit("20/minute")
@@ -216,19 +198,20 @@ def login(request: Request, data: LoginInput, db: Session = Depends(get_db)):
 
     token = create_jwt(str(brokerage_id), data.email)
 
-    return {
-        "access_token": token
-    }
+    return {"access_token": token}
 
-
-# -------- PROTECTED SCORING --------
+# -------- SCORING --------
 
 @app.post("/leads/score")
 @limiter.limit("100/minute")
-def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)):
+def score_lead(
+    request: Request,
+    lead: LeadInput,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     brokerage_id = user["brokerage_id"]
 
-    # Feature engineering (MUST match training)
     buyer_readiness_score = (
         (1 if lead.budget >= 500000 else 0) * 30 +
         (1 if lead.urgency <= 30 else 0) * 30 +
@@ -243,7 +226,7 @@ def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)
 
     speed_penalty = min(max(lead.agent_response_hours, 0), 72) / 72.0 * 100
 
-    X = np.array([[
+    X = np.array([[ 
         lead.budget,
         lead.urgency,
         lead.views,
@@ -267,16 +250,22 @@ def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user)
     else:
         bucket = "COLD"
 
-        # -------- AUDIT LOG --------
-    logging.info(
-        f"brokerage_id={brokerage_id} | user={user['sub']} | "
-        f"budget={lead.budget} urgency={lead.urgency} views={lead.views} "
-        f"saves={lead.saves} preapproved={lead.preapproved} | "
-        f"score={score} bucket={bucket}"
+    logging.info(f"brokerage={brokerage_id} user={user['sub']} score={score} bucket={bucket}")
+
+    row = LeadScore(
+        id=str(uuid.uuid4()),
+        brokerage_id=brokerage_id,
+        user_email=user["sub"],
+        input_payload=lead.dict(),
+        score=score,
+        bucket=bucket,
+        created_at=datetime.utcnow()
     )
 
+    db.add(row)
+    db.commit()
+
     return {
-        "brokerage_id": brokerage_id,
         "score": score,
         "bucket": bucket,
         "probability": float(prob)

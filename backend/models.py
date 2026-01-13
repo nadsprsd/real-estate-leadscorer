@@ -1,7 +1,10 @@
-from sqlalchemy import Column, String, ForeignKey
+from sqlalchemy import Column, String, ForeignKey, Integer, DateTime
 from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.dialects.postgresql import JSON
+from datetime import datetime
 
 Base = declarative_base()
+
 
 class Brokerage(Base):
     __tablename__ = "brokerages"
@@ -21,3 +24,17 @@ class User(Base):
     brokerage_id = Column(String, ForeignKey("brokerages.id"), nullable=False)
 
     brokerage = relationship("Brokerage", back_populates="users")
+
+
+class LeadScore(Base):
+    __tablename__ = "lead_scores"
+
+    id = Column(String, primary_key=True)
+    brokerage_id = Column(String, nullable=False)
+    user_email = Column(String, nullable=False)
+
+    input_payload = Column(JSON, nullable=False)
+
+    score = Column(Integer, nullable=False)
+    bucket = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
