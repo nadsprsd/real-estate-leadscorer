@@ -99,6 +99,14 @@ class LeadInput(BaseModel):
     open_house: int
     agent_response_hours: int
 
+class LeadHistoryOut(BaseModel):
+    id: str
+    user_email: str
+    score: int
+    bucket: str
+    created_at: datetime
+    input_payload: dict    
+
 # ---------------- UTILS ----------------
 
 def hash_password(p: str) -> str:
@@ -270,3 +278,19 @@ def score_lead(
         "bucket": bucket,
         "probability": float(prob)
     }
+
+
+@app.get("/leads/history", response_model=list[LeadHistoryOut])
+def get_lead_history(
+    limit: int = 50,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    rows = (
+        db.query(LeadScore)
+        .order_by(LeadScore.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return rows    
