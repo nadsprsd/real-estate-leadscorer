@@ -19,6 +19,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.db import get_db, set_tenant
 
+from typing import Optional
+from sqlalchemy import select, desc, func
+
 # --------- RATE LIMITING ---------
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -280,6 +283,7 @@ def score_lead(
     }
 
 
+'''
 @app.get("/leads/history", response_model=list[LeadHistoryOut])
 def get_lead_history(
     limit: int = 50,
@@ -294,3 +298,65 @@ def get_lead_history(
     )
 
     return rows    
+'''
+
+@app.get("/leads/history")
+def get_lead_history(
+    limit: int = 20,
+    offset: int = 0,
+    bucket: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    q = db.query(LeadScore)
+
+    if bucket:
+        q = q.filter(LeadScore.bucket == bucket)
+
+    total = q.count()
+
+    rows = (
+        q.order_by(LeadScore.created_at.desc())
+         .limit(limit)
+         .offset(offset)
+         .all()
+    )
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "data": [
+            {
+                "id": r.id,
+                "score": r.score,
+                "bucket": r.bucket,
+                "created_at": r.created_at.isoformat(),
+                "input": r.input_payload,
+                "user": r.user_email
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/leads/stats")
+def lead_stats(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    total = db.query(func.count(LeadScore.id)).scalar()
+
+    hot = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "HOT").scalar()
+    warm = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "WARM").scalar()
+    cold = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "COLD").scalar()
+
+    avg_score = db.query(func.avg(LeadScore.score)).scalar() or 0
+
+    return {
+        "total": total,
+        "hot": hot,
+        "warm": warm,
+        "cold": cold,
+        "avg_score": round(float(avg_score), 2)
+    }
