@@ -15,12 +15,11 @@ from backend.models import LeadScore
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-from sqlalchemy import text
+from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 from backend.db import get_db, set_tenant
 
 from typing import Optional
-from sqlalchemy import select, desc, func
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,8 +28,6 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from backend.models import LeadScore
-
 # ---------------- CONFIG ----------------
 
 JWT_SECRET = "super-secret-change-this"
@@ -38,6 +35,15 @@ JWT_ALGO = "HS256"
 
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ---------------- BILLING CONFIG ----------------
+
+PLAN_LIMITS = {
+    "FREE": 50,
+    "SOLO": 500,
+    "TEAM": 5000,
+    "ENTERPRISE": 9999999,
+}
 
 # ---------------- LOAD MODEL ----------------
 
@@ -48,8 +54,6 @@ model = joblib.load(MODEL_PATH)
 
 app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
 
-
-
 LOG_PATH = os.path.join(os.path.dirname(__file__), "audit.log")
 
 app.add_middleware(
@@ -59,7 +63,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # ---------------- AUDIT LOGGER ----------------
+
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -114,14 +120,6 @@ class LeadInput(BaseModel):
     open_house: int
     agent_response_hours: int
 
-class LeadHistoryOut(BaseModel):
-    id: str
-    user_email: str
-    score: int
-    bucket: str
-    created_at: datetime
-    input_payload: dict    
-
 # ---------------- UTILS ----------------
 
 def hash_password(p: str) -> str:
@@ -153,6 +151,29 @@ def get_current_user(
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# ---------------- BILLING HELPERS ----------------
+
+def get_brokerage_plan_and_usage(db: Session, brokerage_id: str):
+    row = db.execute(
+        text("SELECT plan, monthly_usage FROM brokerages WHERE id = :id"),
+        {"id": brokerage_id}
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid brokerage")
+
+    return row.plan, row.monthly_usage
+
+def increment_usage(db: Session, brokerage_id: str):
+    db.execute(
+        text("""
+        UPDATE brokerages
+        SET monthly_usage = monthly_usage + 1
+        WHERE id = :id
+        """),
+        {"id": brokerage_id}
+    )
+
 # ---------------- ROUTES ----------------
 
 @app.get("/")
@@ -176,7 +197,7 @@ def register(request: Request, data: RegisterInput, db: Session = Depends(get_db
     user_id = str(uuid.uuid4())
 
     db.execute(
-        text("INSERT INTO brokerages (id, name) VALUES (:id, :name)"),
+        text("INSERT INTO brokerages (id, name, plan, monthly_usage) VALUES (:id, :name, 'FREE', 0)"),
         {"id": brokerage_id, "name": data.brokerage_name}
     )
 
@@ -223,6 +244,24 @@ def login(request: Request, data: LoginInput, db: Session = Depends(get_db)):
 
     return {"access_token": token}
 
+# -------- BILLING --------
+
+@app.get("/billing/usage")
+def billing_usage(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    brokerage_id = user["brokerage_id"]
+    plan, usage = get_brokerage_plan_and_usage(db, brokerage_id)
+    limit = PLAN_LIMITS.get(plan, 0)
+
+    return {
+        "plan": plan,
+        "used": usage,
+        "limit": limit,
+        "remaining": max(limit - usage, 0)
+    }
+
 # -------- SCORING --------
 
 @app.post("/leads/score")
@@ -234,6 +273,18 @@ def score_lead(
     db: Session = Depends(get_db)
 ):
     brokerage_id = user["brokerage_id"]
+
+    # ---- BILLING / QUOTA CHECK ----
+    plan, usage = get_brokerage_plan_and_usage(db, brokerage_id)
+    limit = PLAN_LIMITS.get(plan, 0)
+
+    if usage >= limit:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Monthly quota exceeded for plan {plan}. Upgrade required."
+        )
+
+    # ---- FEATURE ENGINEERING ----
 
     buyer_readiness_score = (
         (1 if lead.budget >= 500000 else 0) * 30 +
@@ -286,6 +337,7 @@ def score_lead(
     )
 
     db.add(row)
+    increment_usage(db, brokerage_id)
     db.commit()
 
     return {
@@ -294,23 +346,7 @@ def score_lead(
         "probability": float(prob)
     }
 
-
-'''
-@app.get("/leads/history", response_model=list[LeadHistoryOut])
-def get_lead_history(
-    limit: int = 50,
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    rows = (
-        db.query(LeadScore)
-        .order_by(LeadScore.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-
-    return rows    
-'''
+# -------- HISTORY --------
 
 @app.get("/leads/history")
 def get_lead_history(
@@ -351,6 +387,7 @@ def get_lead_history(
         ]
     }
 
+# -------- STATS --------
 
 @app.get("/leads/stats")
 def lead_stats(

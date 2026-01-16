@@ -3,6 +3,8 @@ from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSON
 from datetime import datetime
 
+from sqlalchemy import Column, String, Integer
+
 Base = declarative_base()
 
 
@@ -11,6 +13,8 @@ class Brokerage(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
+    plan = Column(String, nullable=False, default="FREE")
+    monthly_usage = Column(Integer, nullable=False, default=0)
 
     users = relationship("User", back_populates="brokerage")
 
