@@ -22,10 +22,14 @@ from backend.db import get_db, set_tenant
 from typing import Optional
 from sqlalchemy import select, desc, func
 
+from fastapi.middleware.cors import CORSMiddleware
+
 # --------- RATE LIMITING ---------
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+from backend.models import LeadScore
 
 # ---------------- CONFIG ----------------
 
@@ -44,10 +48,18 @@ model = joblib.load(MODEL_PATH)
 
 app = FastAPI(title="Real Estate Lead Scorer", version="1.0.0")
 
-# ---------------- AUDIT LOGGER ----------------
+
 
 LOG_PATH = os.path.join(os.path.dirname(__file__), "audit.log")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # For dev. In prod we will lock this down.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ---------------- AUDIT LOGGER ----------------
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
