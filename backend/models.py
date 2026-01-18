@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import Column, String, Integer
 
+
 Base = declarative_base()
 
 
@@ -13,8 +14,15 @@ class Brokerage(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
+
+    #Billing
     plan = Column(String, nullable=False, default="FREE")
     monthly_usage = Column(Integer, nullable=False, default=0)
+
+    stripe_customer_id = Column(String, nullable=True)
+    subscription_status = Column(String, nullable=False, default="trial")
+
+
 
     users = relationship("User", back_populates="brokerage")
 
