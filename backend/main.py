@@ -2,10 +2,8 @@ import os
 import uuid
 import time
 import logging
-import joblib
-import numpy as np
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Dict
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,30 +22,35 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Import your local database modules
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 
-# ---------------- CONFIG & CONSTANTS ----------------
+import stripe
 
-JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-change-this-in-prod")
-JWT_ALGO = "HS256"
+# ---------------- ENV ----------------
 
-# Centralized Plan Management
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+# ---------------- PLANS ----------------
+
 PLANS = {
-    "FREE": {"limit": 50, "label": "Free Trial"},
-    "SOLO": {"limit": 500, "label": "Solo Agent"},
-    "TEAM": {"limit": 5000, "label": "Brokerage Team"},
-    "ENTERPRISE": {"limit": 999999, "label": "Enterprise"},
+    "free": {"limit": 50, "price_id": None},
+    "trial": {"limit": 50, "price_id": None},
+    "starter": {"limit": 1000, "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"},
+    "team": {"limit": 5000, "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"},
 }
 
-# ---------------- APP INITIALIZATION ----------------
+# ---------------- APP ----------------
 
-app = FastAPI(title="Real Estate Lead Scorer SaaS", version="1.1.0")
+app = FastAPI(title="LeadScorer SaaS")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with actual frontend URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,40 +59,14 @@ app.add_middleware(
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Rate Limiter setup to prevent API abuse
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 @app.exception_handler(RateLimitExceeded)
 def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded. Slow down!"})
+    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
 
-# ---------------- LOGGING & ML MODEL ----------------
-
-LOG_PATH = os.path.join(os.path.dirname(__file__), "audit.log")
-logging.basicConfig(
-    filename=LOG_PATH,
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "lead_scorer_v1.pkl")
-try:
-    model = joblib.load(MODEL_PATH)
-except Exception as e:
-    logging.error(f"Failed to load ML model: {e}")
-    model = None
-
-# ---------------- MIDDLEWARE ----------------
-
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
-    return response
+logging.basicConfig(filename="audit.log", level=logging.INFO)
 
 # ---------------- SCHEMAS ----------------
 
@@ -112,7 +89,7 @@ class LeadInput(BaseModel):
     open_house: int
     agent_response_hours: int
 
-# ---------------- UTILITIES & AUTH ----------------
+# ---------------- AUTH ----------------
 
 def hash_password(p: str) -> str:
     return pwd_context.hash(p)
@@ -121,84 +98,75 @@ def verify_password(p: str, h: str) -> bool:
     return pwd_context.verify(p, h)
 
 def create_jwt(brokerage_id: str, email: str):
-    payload = {
-        "sub": email,
-        "brokerage_id": brokerage_id,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + (60 * 60 * 24) # 24 hour expiry
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+    payload = {"sub": email, "brokerage_id": brokerage_id, "iat": int(time.time())}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
-        # Force Multi-tenancy at the DB level
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
         set_tenant(db, payload["brokerage_id"])
         return payload
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-# ---------------- BILLING LOGIC ----------------
+# ---------------- BILLING ----------------
 
 def get_billing_status(db: Session, brokerage_id: str) -> Dict:
     row = db.execute(
-        text("SELECT plan, monthly_usage FROM brokerages WHERE id = :id"),
+        text("SELECT plan, monthly_usage FROM brokerages WHERE id=:id"),
         {"id": brokerage_id}
     ).fetchone()
 
-    if not row:
-        raise HTTPException(status_code=400, detail="Brokerage record not found")
+    plan = (row.plan or "free").lower()
+    if plan not in PLANS:
+        plan = "free"
 
-    plan_key = row.plan.upper()
-    limit = PLANS.get(plan_key, PLANS["FREE"])["limit"]
     usage = row.monthly_usage
-    
-    percent_used = int((usage / limit) * 100) if limit > 0 else 0
-    
-    # Alert Logic
+    limit = PLANS[plan]["limit"]
+
+    percent = int((usage / limit) * 100) if limit > 0 else 0
+
     warning = None
-    if percent_used >= 100:
-        warning = "CRITICAL: Quota exhausted. Please upgrade to continue scoring leads."
-    elif percent_used >= 90:
-        warning = "WARNING: 90% of credits used. Service will stop soon."
-    elif percent_used >= 75:
-        warning = "NOTICE: 75% of credits used."
+    if percent >= 100:
+        warning = "Quota exhausted"
+    elif percent >= 90:
+        warning = "90% used"
+    elif percent >= 75:
+        warning = "75% used"
 
     return {
-        "plan": plan_key,
-        "used": usage,
+        "plan": plan,
+        "usage": usage,
         "limit": limit,
         "remaining": max(limit - usage, 0),
-        "percent_used": percent_used,
+        "percent": percent,
         "warning": warning,
-        "is_blocked": usage >= limit
+        "blocked": usage >= limit
     }
 
 # ---------------- ROUTES ----------------
 
-@app.get("/health")
-def health_check():
-    return {"status": "active", "model_loaded": model is not None}
-
-# --- Auth Routes ---
-
 @app.post("/auth/register")
-@limiter.limit("5/minute")
-def register(request: Request, data: RegisterInput, db: Session = Depends(get_db)):
-    exists = db.execute(text("SELECT id FROM users WHERE email = :email"), {"email": data.email}).fetchone()
-    if exists:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
+def register(data: RegisterInput, db: Session = Depends(get_db)):
     brokerage_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
 
     db.execute(
-        text("INSERT INTO brokerages (id, name, plan, monthly_usage) VALUES (:id, :name, 'FREE', 0)"),
+        text("""
+        INSERT INTO brokerages (id, name, plan, monthly_usage, subscription_status)
+        VALUES (:id, :name, 'trial', 0, 'trial')
+        """),
         {"id": brokerage_id, "name": data.brokerage_name}
     )
 
     db.execute(
-        text("INSERT INTO users (id, email, hashed_password, brokerage_id) VALUES (:id, :email, :hp, :bid)"),
+        text("""
+        INSERT INTO users (id, email, hashed_password, brokerage_id)
+        VALUES (:id, :email, :hp, :bid)
+        """),
         {"id": user_id, "email": data.email, "hp": hash_password(data.password), "bid": brokerage_id}
     )
 
@@ -208,86 +176,164 @@ def register(request: Request, data: RegisterInput, db: Session = Depends(get_db
 @app.post("/auth/login")
 def login(data: LoginInput, db: Session = Depends(get_db)):
     row = db.execute(
-        text("SELECT hashed_password, brokerage_id FROM users WHERE email = :email"),
-        {"email": data.email}
+        text("SELECT hashed_password, brokerage_id FROM users WHERE email=:e"),
+        {"e": data.email}
     ).fetchone()
 
     if not row or not verify_password(data.password, row.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid login")
 
     return {"access_token": create_jwt(str(row.brokerage_id), data.email)}
 
-# --- Scoring Route ---
+# ---------------- STRIPE ----------------
+
+@app.post("/billing/checkout")
+def checkout(plan: str, user=Depends(get_current_user)):
+    if plan not in PLANS or PLANS[plan]["price_id"] is None:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": PLANS[plan]["price_id"], "quantity": 1}],
+        success_url="http://localhost:5173/dashboard?success=1",
+        cancel_url="http://localhost:5173/dashboard?cancel=1",
+        metadata={
+            "brokerage_id": user["brokerage_id"],
+            "plan": plan
+        }
+    )
+
+    return {"checkout_url": session.url}
+
+@app.post("/billing/webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid webhook")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+
+        brokerage_id = session["metadata"]["brokerage_id"]
+        plan = session["metadata"]["plan"]
+
+        db.execute(
+            text("""
+            UPDATE brokerages
+            SET plan = :plan, subscription_status = 'active'
+            WHERE id = :id
+            """),
+            {"plan": plan, "id": brokerage_id}
+        )
+        db.commit()
+
+    return {"status": "ok"}
+
+# ---------------- SCORING ----------------
 
 @app.post("/leads/score")
-@limiter.limit("50/minute")
-async def score_lead(request: Request, lead: LeadInput, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    brokerage_id = user["brokerage_id"]
+def score_lead(lead: LeadInput, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    billing = get_billing_status(db, user["brokerage_id"])
+    if billing["blocked"]:
+        raise HTTPException(status_code=402, detail="Quota exceeded")
 
-    # 1. Check Quota Before Processing
-    billing = get_billing_status(db, brokerage_id)
-    if billing["is_blocked"]:
-        raise HTTPException(status_code=402, detail=billing["warning"])
+    # ---- BUSINESS SCORING ----
 
-    # 2. Feature Engineering
-    # (Matches the training logic of the ML model)
     buyer_readiness = (
-        (1 if lead.budget >= 500000 else 0) * 30 +
+        (1 if lead.budget >= 500000 else 0) * 40 +
         (1 if lead.urgency <= 30 else 0) * 30 +
-        (1 if lead.preapproved == 1 else 0) * 40
+        (1 if lead.preapproved == 1 else 0) * 30
     )
+
     engagement = (
-        (lead.views / 50.0) * 50 +
-        (lead.saves / 20.0) * 30 +
+        min(lead.views, 100) / 100 * 40 +
+        min(lead.saves, 20) / 20 * 40 +
         (1 if lead.open_house == 1 else 0) * 20
     )
-    speed_penalty = min(max(lead.agent_response_hours, 0), 72) / 72.0 * 100
 
-    X = np.array([[ 
-        lead.budget, lead.urgency, lead.views, lead.saves, lead.bedrooms,
-        lead.preapproved, lead.open_house, lead.agent_response_hours,
-        buyer_readiness, engagement, speed_penalty
-    ]])
+    speed_penalty = min(lead.agent_response_hours, 72) / 72 * 30
 
-    # 3. Model Prediction
-    try:
-        prob = model.predict_proba(X)[0][1]
-        score = int(prob * 100)
-    except Exception as e:
-        logging.error(f"Prediction Error: {e}")
-        raise HTTPException(status_code=500, detail="ML Model Inference Failed")
+    raw_score = buyer_readiness + engagement - speed_penalty
+    score = int(max(0, min(100, raw_score)))
 
-    bucket = "HOT" if score >= 70 else "WARM" if score >= 40 else "COLD"
+    if score >= 70:
+        bucket = "HOT"
+    elif score >= 40:
+        bucket = "WARM"
+    else:
+        bucket = "COLD"
 
-    # 4. Save Record & Increment Billing
-    new_record = LeadScore(
+    db.add(LeadScore(
         id=str(uuid.uuid4()),
-        brokerage_id=brokerage_id,
+        brokerage_id=user["brokerage_id"],
         user_email=user["sub"],
-        input_payload=lead.model_dump(), # Pydantic v2
+        input_payload=lead.model_dump(),
         score=score,
         bucket=bucket,
         created_at=datetime.utcnow()
-    )
-    db.add(new_record)
-    
+    ))
+
     db.execute(
-        text("UPDATE brokerages SET monthly_usage = monthly_usage + 1 WHERE id = :id"),
-        {"id": brokerage_id}
+        text("UPDATE brokerages SET monthly_usage = monthly_usage + 1 WHERE id=:id"),
+        {"id": user["brokerage_id"]}
     )
-    
+
     db.commit()
 
-    # 5. Return Result + Real-time Billing Metadata
     return {
         "score": score,
         "bucket": bucket,
-        "probability": round(float(prob), 4),
-        "billing_update": get_billing_status(db, brokerage_id)
+        "billing": get_billing_status(db, user["brokerage_id"])
     }
 
-# --- Billing Dashboard Route ---
+# ---------------- DASHBOARD ----------------
 
 @app.get("/billing/usage")
-def view_usage(user=Depends(get_current_user), db: Session = Depends(get_db)):
+def billing_usage(user=Depends(get_current_user), db: Session = Depends(get_db)):
     return get_billing_status(db, user["brokerage_id"])
+
+@app.get("/leads/stats")
+def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    total = db.query(func.count(LeadScore.id)).scalar()
+    hot = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "HOT").scalar()
+    warm = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "WARM").scalar()
+    cold = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "COLD").scalar()
+
+    return {
+        "total": total,
+        "hot": hot,
+        "warm": warm,
+        "cold": cold
+    }
+
+@app.get("/leads/history")
+def leads_history(
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    q = db.query(LeadScore)
+
+    rows = (
+        q.order_by(LeadScore.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+
+    return {
+        "data": [
+            {
+                "id": r.id,
+                "score": r.score,
+                "bucket": r.bucket,
+                "created_at": r.created_at.isoformat()
+            }
+            for r in rows
+        ]
+    }

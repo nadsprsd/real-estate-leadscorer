@@ -20,9 +20,8 @@ class Brokerage(Base):
     monthly_usage = Column(Integer, nullable=False, default=0)
 
     stripe_customer_id = Column(String, nullable=True)
+    stripe_subscription_id = Column(String, nullable=True)  
     subscription_status = Column(String, nullable=False, default="trial")
-
-
 
     users = relationship("User", back_populates="brokerage")
 
