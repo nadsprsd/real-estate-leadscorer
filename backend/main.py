@@ -399,3 +399,74 @@ def leads_history(
             for r in rows
         ]
     }
+
+
+# ---------------- ANALYTICS ----------------
+
+@app.get("/analytics/usage")
+def usage_analytics(
+    days: int = 30,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    bid = user["brokerage_id"]
+
+    rows = db.execute(text("""
+        SELECT
+            DATE(created_at) as d,
+            COUNT(*) as c
+        FROM lead_scores
+        WHERE brokerage_id = :bid
+          AND created_at >= NOW() - INTERVAL ':days days'
+        GROUP BY d
+        ORDER BY d
+    """), {"bid": bid, "days": days}).fetchall()
+
+    return [
+        {"date": str(r.d), "count": r.c}
+        for r in rows
+    ]
+
+
+@app.get("/analytics/buckets")
+def bucket_analytics(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    bid = user["brokerage_id"]
+
+    rows = db.execute(text("""
+        SELECT bucket, COUNT(*) as c
+        FROM lead_scores
+        WHERE brokerage_id = :bid
+        GROUP BY bucket
+    """), {"bid": bid}).fetchall()
+
+    return {
+        r.bucket: r.c for r in rows
+    }
+
+
+@app.get("/analytics/scores")
+def score_analytics(
+    days: int = 30,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    bid = user["brokerage_id"]
+
+    rows = db.execute(text("""
+        SELECT
+            DATE(created_at) as d,
+            AVG(score) as avg
+        FROM lead_scores
+        WHERE brokerage_id = :bid
+          AND created_at >= NOW() - INTERVAL ':days days'
+        GROUP BY d
+        ORDER BY d
+    """), {"bid": bid, "days": days}).fetchall()
+
+    return [
+        {"date": str(r.d), "avg": round(float(r.avg), 2)}
+        for r in rows
+    ]

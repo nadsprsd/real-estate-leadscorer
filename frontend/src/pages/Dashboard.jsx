@@ -1,140 +1,170 @@
 import { useEffect, useState } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+} from "recharts";
 
-const API = "http://127.0.0.1:8000";
+const COLORS = ["#2563eb", "#16a34a", "#dc2626"];
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
-  const [usage, setUsage] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [error, setError] = useState(null);
+  const [usage, setUsage] = useState([]);
+  const [scores, setScores] = useState([]);
+  const [buckets, setBuckets] = useState({});
+  const [billing, setBilling] = useState(null);
 
   const token = localStorage.getItem("token");
+  const email = localStorage.getItem("user_email");
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+  };
 
   useEffect(() => {
-    if (!token) {
-      setError("Not logged in");
-      return;
-    }
+    fetch("http://127.0.0.1:8000/leads/stats", { headers })
+      .then((r) => r.json())
+      .then(setStats);
 
-    const headers = {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json",
-    };
+    fetch("http://127.0.0.1:8000/analytics/usage", { headers })
+      .then((r) => r.json())
+      .then(setUsage);
 
-    // ---- Load Stats ----
-    fetch(`${API}/leads/stats`, { headers })
-      .then(r => {
-        if (!r.ok) throw new Error("Failed to load stats");
-        return r.json();
-      })
-      .then(setStats)
-      .catch(err => setError(err.message));
+    fetch("http://127.0.0.1:8000/analytics/scores", { headers })
+      .then((r) => r.json())
+      .then(setScores);
 
-    // ---- Load Usage ----
-    fetch(`${API}/billing/usage`, { headers })
-      .then(r => {
-        if (!r.ok) throw new Error("Failed to load usage");
-        return r.json();
-      })
-      .then(setUsage)
-      .catch(err => setError(err.message));
+    fetch("http://127.0.0.1:8000/analytics/buckets", { headers })
+      .then((r) => r.json())
+      .then(setBuckets);
 
-    // ---- Load History ----
-    fetch(`${API}/leads/history?limit=5`, { headers })
-      .then(r => {
-        if (!r.ok) throw new Error("Failed to load history");
-        return r.json();
-      })
-      .then(d => setHistory(d.data || []))
-      .catch(err => setError(err.message));
+    fetch("http://127.0.0.1:8000/billing/usage", { headers })
+      .then((r) => r.json())
+      .then(setBilling);
+  }, []);
 
-  }, [token]);
-
-  if (error) {
-    return <div className="text-red-600 p-6">❌ {error}</div>;
+  if (!stats || !billing) {
+    return <div className="p-8">Loading...</div>;
   }
 
-  if (!stats || !usage) {
-    return <div className="p-6">Loading dashboard...</div>;
-  }
+  const pieData = Object.keys(buckets).map((k) => ({
+    name: k,
+    value: buckets[k],
+  }));
 
   return (
     <div className="space-y-6">
 
-      {/* ---- Warning Banner ---- */}
-      {usage.warning && (
-        <div className="bg-yellow-100 border border-yellow-300 p-4 rounded">
-          ⚠️ {usage.warning}
+      {/* Profile */}
+      <div className="flex justify-between items-center bg-white p-4 rounded shadow">
+        <div>
+          <div className="text-lg font-bold">Dashboard</div>
+          <div className="text-sm text-gray-500">{email}</div>
         </div>
-      )}
 
-      {/* ---- Stats Cards ---- */}
+        <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center">
+          {email?.[0]?.toUpperCase()}
+        </div>
+      </div>
+
+      {/* Stats */}
       <div className="grid grid-cols-4 gap-4">
         <Stat title="Total Leads" value={stats.total} />
-        <Stat title="Hot Leads" value={stats.hot} />
-        <Stat title="Warm Leads" value={stats.warm} />
-        <Stat title="Cold Leads" value={stats.cold} />
+        <Stat title="Hot" value={stats.hot} />
+        <Stat title="Warm" value={stats.warm} />
+        <Stat title="Cold" value={stats.cold} />
       </div>
 
-      {/* ---- Usage Bar ---- */}
+      {/* Billing */}
       <div className="bg-white p-4 rounded shadow">
         <div className="font-semibold mb-2">Monthly Usage</div>
-        <div className="w-full bg-gray-200 rounded h-4 overflow-hidden">
+
+        <div className="w-full bg-gray-200 rounded h-4">
           <div
-            className="bg-blue-600 h-4"
-            style={{ width: `${usage.percent}%` }}
+            className="bg-blue-600 h-4 rounded"
+            style={{ width: `${billing.percent}%` }}
           />
         </div>
+
         <div className="text-sm mt-2">
-          {usage.used} / {usage.limit} used ({usage.percent}%)
+          {billing.usage} / {billing.limit} used ({billing.plan})
         </div>
       </div>
 
-      {/* ---- Recent Leads ---- */}
-      <div className="bg-white rounded shadow">
-        <div className="p-4 font-semibold">Recent Leads</div>
+      {/* Charts */}
+      <div className="grid grid-cols-2 gap-6">
 
-        <table className="w-full text-sm">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-2 text-left">Score</th>
-              <th className="p-2 text-left">Bucket</th>
-              <th className="p-2 text-left">Date</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.length === 0 && (
-              <tr>
-                <td colSpan="3" className="p-4 text-center text-gray-400">
-                  No leads yet
-                </td>
-              </tr>
-            )}
+        {/* Usage */}
+        <div className="bg-white p-4 rounded shadow h-80">
+          <div className="font-semibold mb-2">Daily Usage</div>
 
-            {history.map((l) => (
-              <tr key={l.id} className="border-t">
-                <td className="p-2">{l.score}</td>
-                <td className="p-2">
-  <span
-    className={`px-2 py-1 rounded text-white text-xs font-semibold
-    ${
-      l.bucket === "HOT"
-        ? "bg-green-600"
-        : l.bucket === "WARM"
-        ? "bg-yellow-500"
-        : "bg-gray-500"
-    }`}
-  >
-    {l.bucket}
-  </span>
-</td>
-                <td className="p-2">
-                  {new Date(l.created_at).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={usage}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="date" />
+              <YAxis />
+              <Tooltip />
+              <Line
+                type="monotone"
+                dataKey="count"
+                stroke="#2563eb"
+                strokeWidth={2}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Score */}
+        <div className="bg-white p-4 rounded shadow h-80">
+          <div className="font-semibold mb-2">Avg Score Trend</div>
+
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={scores}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="date" />
+              <YAxis domain={[0, 100]} />
+              <Tooltip />
+              <Line
+                type="monotone"
+                dataKey="avg"
+                stroke="#16a34a"
+                strokeWidth={2}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+      </div>
+
+      {/* Buckets */}
+      <div className="bg-white p-4 rounded shadow h-80">
+        <div className="font-semibold mb-2">Lead Quality</div>
+
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={pieData}
+              dataKey="value"
+              nameKey="name"
+              cx="50%"
+              cy="50%"
+              outerRadius={100}
+              label
+            >
+              {pieData.map((_, i) => (
+                <Cell key={i} fill={COLORS[i % COLORS.length]} />
+              ))}
+            </Pie>
+            <Tooltip />
+          </PieChart>
+        </ResponsiveContainer>
       </div>
 
     </div>
