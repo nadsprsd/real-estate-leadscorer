@@ -82,11 +82,11 @@ export default function Dashboard() {
         <div className="w-full bg-gray-200 rounded h-4 overflow-hidden">
           <div
             className="bg-blue-600 h-4"
-            style={{ width: `${usage.percent_used}%` }}
+            style={{ width: `${usage.percent}%` }}
           />
         </div>
         <div className="text-sm mt-2">
-          {usage.used} / {usage.limit} used ({usage.percent_used}%)
+          {usage.used} / {usage.limit} used ({usage.percent}%)
         </div>
       </div>
 
@@ -114,7 +114,20 @@ export default function Dashboard() {
             {history.map((l) => (
               <tr key={l.id} className="border-t">
                 <td className="p-2">{l.score}</td>
-                <td className="p-2 font-semibold">{l.bucket}</td>
+                <td className="p-2">
+  <span
+    className={`px-2 py-1 rounded text-white text-xs font-semibold
+    ${
+      l.bucket === "HOT"
+        ? "bg-green-600"
+        : l.bucket === "WARM"
+        ? "bg-yellow-500"
+        : "bg-gray-500"
+    }`}
+  >
+    {l.bucket}
+  </span>
+</td>
                 <td className="p-2">
                   {new Date(l.created_at).toLocaleString()}
                 </td>
