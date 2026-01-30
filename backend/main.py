@@ -151,6 +151,16 @@ def get_billing_status(db: Session, brokerage_id: str) -> Dict:
 
 @app.post("/auth/register")
 def register(data: RegisterInput, db: Session = Depends(get_db)):
+
+     # Check if email exists
+    existing = db.execute(
+        text("SELECT id FROM users WHERE email = :e"),
+        {"e": data.email}
+    ).fetchone()
+
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
     brokerage_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
 
@@ -297,18 +307,60 @@ def billing_usage(user=Depends(get_current_user), db: Session = Depends(get_db))
     return get_billing_status(db, user["brokerage_id"])
 
 @app.get("/leads/stats")
-def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    total = db.query(func.count(LeadScore.id)).scalar()
-    hot = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "HOT").scalar()
-    warm = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "WARM").scalar()
-    cold = db.query(func.count(LeadScore.id)).filter(LeadScore.bucket == "COLD").scalar()
+def leads_stats(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    bid = user["brokerage_id"]
+
+    total = (
+        db.query(func.count(LeadScore.id))
+        .filter(LeadScore.brokerage_id == bid)
+        .scalar()
+    )
+
+    hot = (
+        db.query(func.count(LeadScore.id))
+        .filter(
+            LeadScore.brokerage_id == bid,
+            LeadScore.bucket == "HOT"
+        )
+        .scalar()
+    )
+
+    warm = (
+        db.query(func.count(LeadScore.id))
+        .filter(
+            LeadScore.brokerage_id == bid,
+            LeadScore.bucket == "WARM"
+        )
+        .scalar()
+    )
+
+    cold = (
+        db.query(func.count(LeadScore.id))
+        .filter(
+            LeadScore.brokerage_id == bid,
+            LeadScore.bucket == "COLD"
+        )
+        .scalar()
+    )
+
+    avg = (
+        db.query(func.avg(LeadScore.score))
+        .filter(LeadScore.brokerage_id == bid)
+        .scalar()
+        or 0
+    )
 
     return {
         "total": total,
         "hot": hot,
         "warm": warm,
-        "cold": cold
+        "cold": cold,
+        "avg_score": round(float(avg), 2),
     }
+
 
 @app.get("/leads/history")
 def leads_history(
@@ -317,22 +369,32 @@ def leads_history(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    q = db.query(LeadScore)
+    bid = user["brokerage_id"]
+
+    q = (
+        db.query(LeadScore)
+        .filter(LeadScore.brokerage_id == bid)
+    )
+
+    total = q.count()
 
     rows = (
         q.order_by(LeadScore.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-        .all()
+         .limit(limit)
+         .offset(offset)
+         .all()
     )
 
     return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "data": [
             {
                 "id": r.id,
                 "score": r.score,
                 "bucket": r.bucket,
-                "created_at": r.created_at.isoformat()
+                "created_at": r.created_at.isoformat(),
             }
             for r in rows
         ]
