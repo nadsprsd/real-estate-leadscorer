@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route } from "react-router-dom";
 
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -10,22 +10,18 @@ import History from "./pages/History";
 import Billing from "./pages/Billing";
 import Settings from "./pages/Settings";
 
-function ProtectedRoute({ children }) {
-  const token = localStorage.getItem("token");
-  if (!token) {
-    return <Navigate to="/" replace />;
-  }
-  return children;
-}
+import ProtectedRoute from "./layout/ProtectedRoute";
 
 export default function App() {
   return (
     <Routes>
-      {/* Public */}
+
+      {/* Public Routes */}
       <Route path="/" element={<Login />} />
       <Route path="/register" element={<Register />} />
 
-      {/* Protected */}
+
+      {/* Protected Routes */}
       <Route
         element={
           <ProtectedRoute>
@@ -39,6 +35,7 @@ export default function App() {
         <Route path="/billing" element={<Billing />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
+
     </Routes>
   );
 }
