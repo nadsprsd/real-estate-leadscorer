@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
+import Billing from "./pages/Billing";
 
 function LoginPage() {
   const [email, setEmail] = useState("");
@@ -70,6 +71,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LoginPage />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/billing" element={<Billing />} />
       </Routes>
     </BrowserRouter>
   );
