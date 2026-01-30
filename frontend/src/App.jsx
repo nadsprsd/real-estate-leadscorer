@@ -2,6 +2,7 @@ import { useState } from "react";
 import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Billing from "./pages/Billing";
+import Settings from "./pages/settings";
 
 function LoginPage() {
   const [email, setEmail] = useState("");
@@ -72,6 +73,8 @@ export default function App() {
         <Route path="/" element={<LoginPage />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/billing" element={<Billing />} />
+        <Route path="/settings" element={<settings />} />
+
       </Routes>
     </BrowserRouter>
   );

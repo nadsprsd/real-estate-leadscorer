@@ -3,11 +3,9 @@ import { useState } from "react";
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
 
-  const submit = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    setError("");
 
     const res = await fetch("http://127.0.0.1:8000/auth/login", {
       method: "POST",
@@ -15,33 +13,28 @@ export default function Login() {
       body: JSON.stringify({ email, password }),
     });
 
-    const data = await res.json();
-
     if (!res.ok) {
-      setError(data.detail || "Login failed");
+      alert("Login failed");
       return;
     }
 
+    const data = await res.json();
     localStorage.setItem("token", data.access_token);
+    localStorage.setItem("user_email", email);
+
     window.location.href = "/dashboard";
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
       <form
-        onSubmit={submit}
-        className="bg-white p-8 rounded shadow w-96"
+        onSubmit={handleLogin}
+        className="bg-white p-6 rounded shadow w-80 space-y-4"
       >
-        <h1 className="text-2xl font-bold mb-4">Login</h1>
-
-        {error && (
-          <div className="bg-red-100 text-red-700 p-2 mb-3 rounded">
-            {error}
-          </div>
-        )}
+        <h2 className="text-xl font-bold text-center">Login</h2>
 
         <input
-          className="w-full border p-2 mb-3"
+          className="w-full border p-2 rounded"
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -49,13 +42,13 @@ export default function Login() {
 
         <input
           type="password"
-          className="w-full border p-2 mb-3"
+          className="w-full border p-2 rounded"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
 
-        <button className="w-full bg-blue-600 text-white p-2 rounded">
+        <button className="w-full bg-blue-600 text-white py-2 rounded">
           Login
         </button>
       </form>
