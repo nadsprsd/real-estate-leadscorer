@@ -41,19 +41,18 @@ class LeadScore(Base):
     __tablename__ = "lead_scores"
 
     id = Column(String, primary_key=True)
+
     brokerage_id = Column(String, nullable=False)
     user_email = Column(String, nullable=False)
 
     input_payload = Column(JSON, nullable=False)
 
-     # AI fields
+    # AI fields 
     urgency_score = Column(Integer)
     sentiment = Column(String)
-    ai_entities = Column(JSON)
     ai_recommendation = Column(String)
 
     score = Column(Integer, nullable=False)
     bucket = Column(String, nullable=False)
 
-    
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

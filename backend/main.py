@@ -270,18 +270,25 @@ def score_lead(
 
     # Save to DB
     record = LeadScore(
-        id=str(uuid.uuid4()),
-        brokerage_id=user["brokerage_id"],
-        user_email=user["sub"],
-        input_payload={
-            "message": lead.message,
-            "ai": ai_result,
-            "source": lead.source
-        },
-        score=score,
-        bucket=bucket,
-        created_at=datetime.utcnow()
-    )
+    id=str(uuid.uuid4()),
+    brokerage_id=user["brokerage_id"],
+    user_email=user["sub"],
+
+    input_payload={
+        "message": lead.message,
+        "entities": entities,
+        "source": lead.source
+    },
+
+    urgency_score=urgency,
+    sentiment=sentiment,
+    ai_recommendation=recommendation,
+
+    score=score,
+    bucket=bucket,
+
+    created_at=datetime.utcnow()
+)
 
     db.add(record)
 
@@ -296,7 +303,7 @@ def score_lead(
         "score": score,
         "bucket": bucket,
         "sentiment": sentiment,
-        "ai_entities": entities,
+        "entities": entities,
         "ai_recommendation": recommendation,
         "billing": get_billing_status(db, user["brokerage_id"])
     }
