@@ -24,6 +24,7 @@ class Brokerage(Base):
     subscription_status = Column(String, nullable=False, default="trial")
 
     users = relationship("User", back_populates="brokerage")
+    industry = Column(String, default="real_estate")
 
 
 class User(Base):

@@ -83,6 +83,9 @@ class LeadInput(BaseModel):
     message: str   # Raw Inquiry text
     source: str = "manual"
 
+class IndustryUpdate(BaseModel):
+    industry: str    
+
 # ---------------- AUTH ----------------
 
 def hash_password(p: str) -> str:
@@ -105,6 +108,7 @@ def get_current_user(
         return payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    
 
 # ---------------- BILLING ----------------
 
@@ -249,9 +253,17 @@ def score_lead(
     billing = get_billing_status(db, user["brokerage_id"])
     if billing["blocked"]:
         raise HTTPException(status_code=402, detail="Quota exceeded")
+    
+
+    row = db.execute(
+    text("SELECT industry FROM brokerages WHERE id=:id"),
+    {"id": user["brokerage_id"]}
+    ).fetchone()
+
+    industry = row.industry if row else "real_estate"
 
     #  Send to AI
-    ai_result = analyze_lead_message(lead.message)
+    ai_result = analyze_lead_message(lead.message, industry)
 
     urgency = ai_result["urgency_score"]
     sentiment = ai_result["sentiment"]
@@ -478,3 +490,28 @@ def score_analytics(
         {"date": str(r.d), "avg": round(float(r.avg), 2)}
         for r in rows
     ]
+
+
+#Industry 
+
+@app.post("/settings/industry")
+def update_industry(
+    data: IndustryUpdate,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if data.industry not in ["real_estate", "logistics", "custom"]:
+        raise HTTPException(400, "Invalid industry")
+
+    db.execute(
+        text("""
+        UPDATE brokerages
+        SET industry = :i
+        WHERE id = :id
+        """),
+        {"i": data.industry, "id": user["brokerage_id"]}
+    )
+
+    db.commit()
+
+    return {"status": "updated"}
