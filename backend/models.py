@@ -46,6 +46,14 @@ class LeadScore(Base):
 
     input_payload = Column(JSON, nullable=False)
 
+     # AI fields
+    urgency_score = Column(Integer)
+    sentiment = Column(String)
+    ai_entities = Column(JSON)
+    ai_recommendation = Column(String)
+
     score = Column(Integer, nullable=False)
     bucket = Column(String, nullable=False)
+
+    
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

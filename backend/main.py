@@ -26,9 +26,9 @@ from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 
 import stripe
+from backend.services.ai_engine import analyze_lead_message
 
 # ---------------- ENV ----------------
-
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
@@ -80,14 +80,8 @@ class LoginInput(BaseModel):
     password: str
 
 class LeadInput(BaseModel):
-    budget: float
-    urgency: int
-    views: int
-    saves: int
-    bedrooms: int
-    preapproved: int
-    open_house: int
-    agent_response_hours: int
+    message: str   # Raw Inquiry text
+    source: str = "manual"
 
 # ---------------- AUTH ----------------
 
@@ -246,46 +240,50 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 # ---------------- SCORING ----------------
 
 @app.post("/leads/score")
-def score_lead(lead: LeadInput, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def score_lead(
+    lead: LeadInput,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+
     billing = get_billing_status(db, user["brokerage_id"])
     if billing["blocked"]:
         raise HTTPException(status_code=402, detail="Quota exceeded")
 
-    # ---- BUSINESS SCORING ----
+    #  Send to AI
+    ai_result = analyze_lead_message(lead.message)
 
-    buyer_readiness = (
-        (1 if lead.budget >= 500000 else 0) * 40 +
-        (1 if lead.urgency <= 30 else 0) * 30 +
-        (1 if lead.preapproved == 1 else 0) * 30
-    )
+    urgency = ai_result["urgency_score"]
+    sentiment = ai_result["sentiment"]
+    entities = ai_result["entities"]
+    recommendation = ai_result["recommendation"]
 
-    engagement = (
-        min(lead.views, 100) / 100 * 40 +
-        min(lead.saves, 20) / 20 * 40 +
-        (1 if lead.open_house == 1 else 0) * 20
-    )
-
-    speed_penalty = min(lead.agent_response_hours, 72) / 72 * 30
-
-    raw_score = buyer_readiness + engagement - speed_penalty
-    score = int(max(0, min(100, raw_score)))
-
-    if score >= 70:
+    # Determine Bucket
+    if urgency >= 80:
         bucket = "HOT"
-    elif score >= 40:
+    elif urgency >= 50:
         bucket = "WARM"
     else:
         bucket = "COLD"
 
-    db.add(LeadScore(
+    score = urgency
+
+    # Save to DB
+    record = LeadScore(
         id=str(uuid.uuid4()),
         brokerage_id=user["brokerage_id"],
         user_email=user["sub"],
-        input_payload=lead.model_dump(),
+        input_payload={
+            "message": lead.message,
+            "ai": ai_result,
+            "source": lead.source
+        },
         score=score,
         bucket=bucket,
         created_at=datetime.utcnow()
-    ))
+    )
+
+    db.add(record)
 
     db.execute(
         text("UPDATE brokerages SET monthly_usage = monthly_usage + 1 WHERE id=:id"),
@@ -297,6 +295,9 @@ def score_lead(lead: LeadInput, user=Depends(get_current_user), db: Session = De
     return {
         "score": score,
         "bucket": bucket,
+        "sentiment": sentiment,
+        "ai_entities": entities,
+        "ai_recommendation": recommendation,
         "billing": get_billing_status(db, user["brokerage_id"])
     }
 

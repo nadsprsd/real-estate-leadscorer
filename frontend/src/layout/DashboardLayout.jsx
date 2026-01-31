@@ -19,7 +19,7 @@ export default function DashboardLayout() {
 
       {/* Sidebar */}
       <div className="w-60 bg-slate-900 text-white p-4 space-y-4">
-        <h1 className="text-2xl font-bold">LeadScorer</h1>
+        <h1 className="text-2xl font-bold">Lead Ranker</h1>
 
         <NavItem to="/dashboard">Dashboard</NavItem>
         <NavItem to="/score">Score Lead</NavItem>
