@@ -348,10 +348,15 @@ def leads_history(
         "data": [
             {
                 "id": r.id,
+                "lead": r.input_payload.get("text")
+                    or r.input_payload.get("message")
+                    or r.input_payload.get("subject"),
                 "score": r.score,
                 "bucket": r.bucket,
                 "sentiment": r.sentiment,
                 "created_at": r.created_at.isoformat(),
+                "message": r.input_payload.get("message", ""),
+                "recommendation": r.ai_recommendation
             }
             for r in rows
         ],

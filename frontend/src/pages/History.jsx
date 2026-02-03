@@ -62,52 +62,69 @@ export default function History() {
 
         <table className="w-full text-sm">
 
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-3 text-left">Score</th>
-              <th className="p-3 text-left">Bucket</th>
-              <th className="p-3 text-left">Date</th>
-            </tr>
-          </thead>
+  <thead className="bg-gray-100">
+    <tr>
+      <th className="p-3 text-left">Lead</th>
+      <th className="p-3 text-left">Score</th>
+      <th className="p-3 text-left">Bucket</th>
+      <th className="p-3 text-left">Action</th>
+      <th className="p-3 text-left">Date</th>
+    </tr>
+  </thead>
 
-          <tbody>
-            {filtered.map((l) => (
-              <tr key={l.id} className="border-t">
+  <tbody>
+  {filtered.map((l) => {
+    let action = "Review";
 
-                <td className="p-3 font-medium">{l.score}</td>
+    if (l.score >= 85) action = "📞 Call Now";
+    else if (l.score >= 60) action = "✉️ Follow Up";
+    else action = "🕒 Nurture";
 
-                <td className="p-3">
-                  <span
-                    className={`px-2 py-1 rounded text-xs ${
-                      l.bucket === "HOT"
-                        ? "bg-red-100 text-red-700"
-                        : l.bucket === "WARM"
-                        ? "bg-yellow-100 text-yellow-700"
-                        : "bg-blue-100 text-blue-700"
-                    }`}
-                  >
-                    {l.bucket}
-                  </span>
-                </td>
+    return (
+      <tr key={l.id} className="border-t">
+        <td className="p-3 max-w-xs truncate">
+          {l.lead || "—"}
+        </td>
 
-                <td className="p-3">
-                  {new Date(l.created_at).toLocaleString()}
-                </td>
+        <td className="p-3 font-medium">{l.score}</td>
 
-              </tr>
-            ))}
+        <td className="p-3">
+          <span
+            className={`px-2 py-1 rounded text-xs ${
+              l.bucket === "HOT"
+                ? "bg-red-100 text-red-700"
+                : l.bucket === "WARM"
+                ? "bg-yellow-100 text-yellow-700"
+                : "bg-blue-100 text-blue-700"
+            }`}
+          >
+            {l.bucket}
+          </span>
+        </td>
 
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan="3" className="p-6 text-center text-gray-500">
-                  No leads yet
-                </td>
-              </tr>
-            )}
+        <td className="p-3 font-medium text-blue-700">
+          {action}
+        </td>
 
-          </tbody>
+        <td className="p-3">
+          {new Date(l.created_at).toLocaleString()}
+        </td>
+      </tr>
+    );
+  })}
 
-        </table>
+  {filtered.length === 0 && (
+    <tr>
+      <td colSpan="5" className="p-6 text-center text-gray-500">
+        No leads yet
+      </td>
+    </tr>
+  )}
+</tbody>
+
+
+</table>
+
 
       </div>
 
