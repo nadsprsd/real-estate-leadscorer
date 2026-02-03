@@ -9,17 +9,20 @@ import Score from "./pages/Score";
 import History from "./pages/History";
 import Billing from "./pages/Billing";
 import Settings from "./pages/Settings";
+import TestApi from "./TestAPI";
 
 import ProtectedRoute from "./layout/ProtectedRoute";
 
-export default function App() {
+function App() {
+  // 🔹 TEMP: enable to test API
+  // return <TestApi />;
+
+  // 🔹 NORMAL APP
   return (
     <Routes>
-
       {/* Public Routes */}
       <Route path="/" element={<Login />} />
       <Route path="/register" element={<Register />} />
-
 
       {/* Protected Routes */}
       <Route
@@ -35,7 +38,8 @@ export default function App() {
         <Route path="/billing" element={<Billing />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
-
     </Routes>
   );
 }
+
+export default App;

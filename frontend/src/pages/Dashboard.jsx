@@ -30,23 +30,23 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetch("http://127.0.0.1:8000/leads/stats", { headers })
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then(setStats);
 
     fetch("http://127.0.0.1:8000/analytics/usage", { headers })
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : []))
       .then(setUsage);
 
     fetch("http://127.0.0.1:8000/analytics/scores", { headers })
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : []))
       .then(setScores);
 
     fetch("http://127.0.0.1:8000/analytics/buckets", { headers })
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : {}))
       .then(setBuckets);
 
     fetch("http://127.0.0.1:8000/billing/usage", { headers })
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then(setBilling);
   }, []);
 
@@ -54,7 +54,10 @@ export default function Dashboard() {
     return <div className="p-8">Loading...</div>;
   }
 
-  const pieData = Object.keys(buckets).map((k) => ({
+  const safeUsage = Array.isArray(usage) ? usage : [];
+  const safeScores = Array.isArray(scores) ? scores : [];
+
+  const pieData = Object.keys(buckets || {}).map((k) => ({
     name: k,
     value: buckets[k],
   }));
@@ -102,11 +105,11 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-6">
 
         {/* Usage */}
-        <div className="bg-white p-4 rounded shadow h-80">
+        <div className="bg-white p-4 rounded shadow" style={{ height: 320 }}>
           <div className="font-semibold mb-2">Daily Usage</div>
 
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={usage}>
+            <LineChart data={safeUsage}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="date" />
               <YAxis />
@@ -122,11 +125,11 @@ export default function Dashboard() {
         </div>
 
         {/* Score */}
-        <div className="bg-white p-4 rounded shadow h-80">
+        <div className="bg-white p-4 rounded shadow" style={{ height: 320 }}>
           <div className="font-semibold mb-2">Avg Score Trend</div>
 
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={scores}>
+            <LineChart data={safeScores}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="date" />
               <YAxis domain={[0, 100]} />
@@ -144,7 +147,7 @@ export default function Dashboard() {
       </div>
 
       {/* Buckets */}
-      <div className="bg-white p-4 rounded shadow h-80">
+      <div className="bg-white p-4 rounded shadow" style={{ height: 320 }}>
         <div className="font-semibold mb-2">Lead Quality</div>
 
         <ResponsiveContainer width="100%" height="100%">
