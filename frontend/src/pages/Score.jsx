@@ -1,122 +1,87 @@
 import { useState } from "react";
+import { apiPost } from "../api";
 
-export default function ScoreLead() {
-  const [form, setForm] = useState({
-    budget: 800000,
-    urgency: 15,
-    views: 20,
-    saves: 5,
-    bedrooms: 3,
-    preapproved: 1,
-    open_house: 1,
-    agent_response_hours: 2,
-  });
+export default function Score() {
 
+  const [message, setMessage] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
 
-  function handleChange(e) {
-    setForm({ ...form, [e.target.name]: Number(e.target.value) });
-  }
+  async function submit(e) {
+    e.preventDefault();
 
-  async function submit() {
     setLoading(true);
-    setError(null);
+    setResult(null);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/leads/score", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-        body: JSON.stringify(form),
+
+      const res = await apiPost("/leads/score", {
+        message,
+        source: "manual",
       });
 
-      if (!res.ok) throw new Error("Scoring failed");
+      setResult(res);
 
-      const data = await res.json();
-      setResult(data);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
+    } catch {
+      alert("Scoring failed");
     }
+
+    setLoading(false);
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <h1 className="text-2xl font-bold">Score a Lead</h1>
+    <div className="max-w-xl space-y-6">
 
-      {/* Form */}
-      <div className="grid grid-cols-2 gap-4 bg-white p-6 rounded shadow">
-        {Object.keys(form).map((k) => (
-          <div key={k}>
-            <label className="text-sm text-gray-600">{k}</label>
-            <input
-              type="number"
-              name={k}
-              value={form[k]}
-              onChange={handleChange}
-              className="w-full border p-2 rounded"
-            />
-          </div>
-        ))}
+      <h1 className="text-2xl font-bold">
+        Score Lead
+      </h1>
 
-        <div className="col-span-2">
-          <button
-            onClick={submit}
-            disabled={loading}
-            className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700"
-          >
-            {loading ? "Scoring..." : "Score Lead"}
-          </button>
-        </div>
-      </div>
+      <form onSubmit={submit} className="space-y-4">
 
-      {/* Result */}
+        <textarea
+          className="w-full border p-3 rounded"
+          rows="5"
+          placeholder="Paste lead message..."
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          required
+        />
+
+        <button
+          disabled={loading}
+          className="bg-blue-600 text-white px-4 py-2 rounded"
+        >
+          {loading ? "Analyzing..." : "Analyze"}
+        </button>
+
+      </form>
+
+
       {result && (
-        <div className="bg-white p-6 rounded shadow border-l-8
-          border-green-500">
-          <div className="text-sm text-gray-500">Lead Score</div>
-          <div className="text-5xl font-bold">{result.score}</div>
 
-          <div className="mt-2">
-            <span
-              className={`px-3 py-1 rounded text-white font-semibold
-              ${
-                result.bucket === "HOT"
-                  ? "bg-green-600"
-                  : result.bucket === "WARM"
-                  ? "bg-yellow-500"
-                  : "bg-gray-500"
-              }`}
-            >
-              {result.bucket}
-            </span>
+        <div className="bg-white p-4 rounded shadow space-y-2">
+
+          <div>
+            <b>Score:</b> {result.score}
           </div>
 
-          {/* Progress bar */}
-          <div className="mt-4">
-            <div className="w-full bg-gray-200 rounded h-3">
-              <div
-                className="h-3 rounded bg-blue-600"
-                style={{ width: `${result.score}%` }}
-              />
-            </div>
-            <div className="text-sm text-gray-500 mt-1">
-              Score strength
-            </div>
+          <div>
+            <b>Bucket:</b> {result.bucket}
           </div>
+
+          <div>
+            <b>Sentiment:</b> {result.sentiment}
+          </div>
+
+          <div>
+            <b>Recommendation:</b><br />
+            {result.ai_recommendation}
+          </div>
+
         </div>
+
       )}
 
-      {error && (
-        <div className="bg-red-100 text-red-700 p-3 rounded">
-          {error}
-        </div>
-      )}
     </div>
   );
 }

@@ -1,8 +1,10 @@
+# backend/main.py
+
 import os
 import uuid
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict
 
 from dotenv import load_dotenv
@@ -10,7 +12,6 @@ load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pydantic import BaseModel
@@ -21,27 +22,32 @@ from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 
 import stripe
+from fastapi import Header
 
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
 
 
-# ---------------- ENV ----------------
+# ---------------- CONFIG ----------------
+
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
-# ---------------- PLANS ----------------
+
 PLANS = {
-    "free": {"limit": 50},
-    "trial": {"limit": 50},
-    "starter": {"limit": 1000},
-    "team": {"limit": 5000},
+    "free": {"limit": 50, "price_id": None},
+    "trial": {"limit": 50, "price_id": None},
+    "starter": {"limit": 1000, "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"},
+    "team": {"limit": 5000, "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"},
 }
 
+
 # ---------------- APP ----------------
+
 app = FastAPI(title="LeadScorer SaaS")
 
 app.add_middleware(
@@ -54,61 +60,100 @@ app.add_middleware(
 
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-logging.basicConfig(filename="audit.log", level=logging.INFO)
+
+logging.basicConfig(level=logging.INFO)
 
 
 # ---------------- SCHEMAS ----------------
+
 class RegisterInput(BaseModel):
     email: str
     password: str
     brokerage_name: str
 
+
 class LoginInput(BaseModel):
     email: str
     password: str
+
 
 class LeadInput(BaseModel):
     message: str
     source: str = "manual"
 
-class IndustryUpdate(BaseModel):
-    industry: str
+
+class CheckoutInput(BaseModel):
+    plan: str
 
 
-# ---------------- AUTH HELPERS ----------------
-def hash_password(p): return pwd_context.hash(p)
-def verify_password(p, h): return pwd_context.verify(p, h)
+# ---------------- AUTH ----------------
+
+def hash_password(p): 
+    return pwd_context.hash(p)
+
+
+def verify_password(p, h): 
+    return pwd_context.verify(p, h)
+
 
 def create_jwt(brokerage_id: str, email: str):
-    payload = {"sub": email, "brokerage_id": brokerage_id, "iat": int(time.time())}
+
+    payload = {
+        "sub": email,
+        "brokerage_id": brokerage_id,
+        "iat": int(time.time())
+    }
+
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ):
+
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+
+        payload = jwt.decode(
+            creds.credentials,
+            JWT_SECRET,
+            algorithms=["HS256"]
+        )
+
         set_tenant(db, payload["brokerage_id"])
+
         return payload
+
     except JWTError:
         raise HTTPException(401, "Invalid token")
 
 
 # ---------------- BILLING ----------------
-def get_billing_status(db, bid):
-    row = db.execute(
-        text("SELECT plan, monthly_usage FROM brokerages WHERE id=:id"),
-        {"id": bid}
+
+def get_billing_status(db: Session, brokerage_id: str) -> Dict:
+
+    row = db.execute(text("""
+        SELECT COUNT(*) 
+        FROM lead_scores
+        WHERE brokerage_id=:id
+          AND created_at >= date_trunc('month', NOW())
+    """), {"id": brokerage_id}).fetchone()
+
+    usage = row[0] if row else 0
+
+    plan_row = db.execute(
+        text("SELECT plan FROM brokerages WHERE id=:id"),
+        {"id": brokerage_id}
     ).fetchone()
 
-    plan = (row.plan or "free").lower()
+    plan = (plan_row.plan or "free").lower()
+
     if plan not in PLANS:
         plan = "free"
 
-    usage = row.monthly_usage
     limit = PLANS[plan]["limit"]
-    percent = int((usage / limit) * 100)
+
+    percent = int((usage / limit) * 100) if limit else 0
 
     return {
         "plan": plan,
@@ -120,46 +165,90 @@ def get_billing_status(db, bid):
     }
 
 
+# ---------------- CORE SAVE ----------------
+
+def save_lead(
+    db: Session,
+    brokerage_id: str,
+    email: str,
+    payload: dict,
+    ai: dict
+):
+
+    score = ai["urgency_score"]
+
+    bucket = (
+        "HOT" if score >= 80
+        else "WARM" if score >= 50
+        else "COLD"
+    )
+
+    lead = LeadScore(
+        id=str(uuid.uuid4()),
+        brokerage_id=brokerage_id,
+        user_email=email,
+
+        input_payload=payload,
+
+        urgency_score=score,
+        sentiment=ai["sentiment"],
+        ai_recommendation=ai["recommendation"],
+
+        score=score,
+        bucket=bucket,
+
+        created_at=datetime.now(timezone.utc)
+    )
+
+    db.add(lead)
+    db.commit()
+
+    return lead, bucket, score
+
+
 # ---------------- AUTH ROUTES ----------------
+
 @app.post("/auth/register")
 def register(data: RegisterInput, db: Session = Depends(get_db)):
-    existing = db.execute(
+
+    exists = db.execute(
         text("SELECT id FROM users WHERE email=:e"),
         {"e": data.email}
     ).fetchone()
 
-    if existing:
+    if exists:
         raise HTTPException(400, "Email exists")
 
     bid = str(uuid.uuid4())
     uid = str(uuid.uuid4())
 
     db.execute(text("""
-        INSERT INTO brokerages
-        (id, name, plan, monthly_usage, subscription_status, industry)
-        VALUES (:id, :n, 'trial', 0, 'trial', 'real_estate')
-    """), {"id": bid, "n": data.brokerage_name})
+        INSERT INTO brokerages (id,name,plan,industry)
+        VALUES (:i,:n,'trial','real_estate')
+    """), {"i": bid, "n": data.brokerage_name})
 
     db.execute(text("""
-        INSERT INTO users
-        (id, email, hashed_password, brokerage_id)
-        VALUES (:id, :e, :p, :b)
+        INSERT INTO users (id,email,hashed_password,brokerage_id)
+        VALUES (:i,:e,:p,:b)
     """), {
-        "id": uid,
+        "i": uid,
         "e": data.email,
         "p": hash_password(data.password),
         "b": bid
     })
 
     db.commit()
+
     return {"access_token": create_jwt(bid, data.email)}
+
 
 @app.post("/auth/login")
 def login(data: LoginInput, db: Session = Depends(get_db)):
-    row = db.execute(
-        text("SELECT hashed_password, brokerage_id FROM users WHERE email=:e"),
-        {"e": data.email}
-    ).fetchone()
+
+    row = db.execute(text("""
+        SELECT hashed_password, brokerage_id
+        FROM users WHERE email=:e
+    """), {"e": data.email}).fetchone()
 
     if not row or not verify_password(data.password, row.hashed_password):
         raise HTTPException(401, "Invalid login")
@@ -167,202 +256,197 @@ def login(data: LoginInput, db: Session = Depends(get_db)):
     return {"access_token": create_jwt(str(row.brokerage_id), data.email)}
 
 
+# ---------------- STRIPE ----------------
+
+@app.post("/billing/checkout")
+def checkout(
+    data: CheckoutInput,
+    user=Depends(get_current_user)
+):
+
+    plan = data.plan
+
+    if plan not in PLANS:
+        raise HTTPException(400, "Invalid plan")
+
+    price_id = PLANS[plan]["price_id"]
+
+    if not price_id:
+        raise HTTPException(400, "Plan not payable")
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{
+            "price": price_id,
+            "quantity": 1
+        }],
+        success_url="http://localhost:5173/dashboard?paid=1",
+        cancel_url="http://localhost:5173/billing?cancel=1",
+        customer_email=user["sub"],
+        metadata={
+            "brokerage_id": user["brokerage_id"],
+            "plan": plan
+        }
+    )
+
+    return {"checkout_url": session.url}
+
+
+
+#Stripe webhook
+
+@app.post("/billing/webhook")
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: str = Header(None),
+    db: Session = Depends(get_db),
+):
+    payload = await request.body()
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload,
+            stripe_signature,
+            STRIPE_WEBHOOK_SECRET
+        )
+    except Exception as e:
+        logging.error(f"Stripe webhook error: {e}")
+        raise HTTPException(status_code=400, detail="Webhook error")
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    logging.info(f"Stripe event received: {event_type}")
+
+    # ✅ PAYMENT SUCCESS → ACTIVATE PLAN
+    if event_type in (
+        "checkout.session.completed",
+        "invoice.payment_succeeded",
+    ):
+        customer_id = data.get("customer")
+        subscription_id = data.get("subscription")
+
+        # Metadata is only present on checkout.session
+        metadata = data.get("metadata", {})
+        brokerage_id = metadata.get("brokerage_id")
+        plan = metadata.get("plan")
+
+        if not brokerage_id:
+            logging.warning("Missing brokerage_id in webhook")
+            return {"status": "ignored"}
+
+        db.execute(text("""
+            UPDATE brokerages
+            SET
+                plan = :plan,
+                subscription_status = 'active',
+                stripe_customer_id = :cust,
+                stripe_subscription_id = :sub
+            WHERE id = :bid
+        """), {
+            "plan": plan,
+            "cust": customer_id,
+            "sub": subscription_id,
+            "bid": brokerage_id
+        })
+
+        db.commit()
+
+        logging.info(
+            f"Brokerage {brokerage_id} upgraded to {plan}"
+        )
+
+    return {"status": "ok"}
+
+
+
+
 # ---------------- SCORE ----------------
+
 @app.post("/leads/score")
 def score_lead(
     lead: LeadInput,
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+
     billing = get_billing_status(db, user["brokerage_id"])
+
     if billing["blocked"]:
         raise HTTPException(402, "Quota exceeded")
 
     row = db.execute(
-        text("SELECT industry FROM brokerages WHERE id=:id"),
-        {"id": user["brokerage_id"]}
+        text("SELECT industry FROM brokerages WHERE id=:i"),
+        {"i": user["brokerage_id"]}
     ).fetchone()
 
     industry = row.industry if row else "real_estate"
+
     ai = analyze_lead_message(lead.message, industry)
 
-    score = ai["urgency_score"]
-    bucket = "HOT" if score >= 80 else "WARM" if score >= 50 else "COLD"
+    payload = {
+        "message": lead.message,
+        "source": lead.source,
+        "entities": ai["entities"]
+    }
 
-    record = LeadScore(
-        id=str(uuid.uuid4()),
-        brokerage_id=user["brokerage_id"],
-        user_email=user["sub"],
-        input_payload={
-            "message": lead.message,
-            "source": lead.source,
-            "entities": ai["entities"]
-        },
-        urgency_score=score,
-        sentiment=ai["sentiment"],
-        ai_recommendation=ai["recommendation"],
-        score=score,
-        bucket=bucket,
-        created_at=datetime.utcnow()
+    record, bucket, score = save_lead(
+        db,
+        user["brokerage_id"],
+        user["sub"],
+        payload,
+        ai
     )
-
-    db.add(record)
-    db.execute(
-        text("UPDATE brokerages SET monthly_usage = monthly_usage + 1 WHERE id=:id"),
-        {"id": user["brokerage_id"]}
-    )
-    db.commit()
 
     return {
         "score": score,
         "bucket": bucket,
         "sentiment": ai["sentiment"],
         "entities": ai["entities"],
-        "recommendation": ai["recommendation"],
+        "ai_recommendation": ai["recommendation"],
         "billing": get_billing_status(db, user["brokerage_id"])
     }
 
 
-# ================= EMAIL INBOUND (MUST BE ABOVE DYNAMIC ROUTE) =================
-@app.post("/inbound/email")
-async def inbound_email(payload: dict, db: Session = Depends(get_db)):
-
-    data = payload.get("data", {})
-
-    from_email = data.get("from")
-    to_email = data.get("to")
-    subject = data.get("subject")
-    text = data.get("text")
-
-    #print("RECEIVED:", text)
-
-    if not text:
-        raise HTTPException(400, "Message is required")
-
-    brokerage_id = "demo"
-    if to_email and "+" in to_email:
-        brokerage_id = to_email.split("+")[1].split("@")[0]
-
-    ai = analyze_lead_message(text, "real_estate")
-    urgency = ai["urgency_score"]
-    bucket = "HOT" if urgency >= 80 else "WARM" if urgency >= 50 else "COLD"
-
-    lead = LeadScore(
-        id=str(uuid.uuid4()),
-        brokerage_id=brokerage_id,
-        user_email=from_email,
-        input_payload={
-            "subject": subject,
-            "text": text,
-            "source": "email",
-            "entities": ai["entities"]
-        },
-        urgency_score=urgency,
-        sentiment=ai["sentiment"],
-        ai_recommendation=ai["recommendation"],
-        score=urgency,
-        bucket=bucket,
-        created_at=datetime.utcnow()
-    )
-
-    db.add(lead)
-    db.commit()
-
-    return {"status": "ok", "bucket": bucket, "score": urgency}
-
-
-# ---------------- GENERIC INBOUND (forms, ads, crm) ----------------
-@app.post("/inbound/{brokerage_id}")
-async def inbound_webhook(
-    brokerage_id: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    payload = await request.json()
-    message = payload.get("message")
-
-    if not message:
-        raise HTTPException(400, "Message is required")
-
-    row = db.execute(
-        text("SELECT industry FROM brokerages WHERE id=:id"),
-        {"id": brokerage_id}
-    ).fetchone()
-
-    industry = row.industry if row else "real_estate"
-    ai = analyze_lead_message(message, industry)
-
-    urgency = ai["urgency_score"]
-    bucket = "HOT" if urgency >= 80 else "WARM" if urgency >= 50 else "COLD"
-
-    lead = LeadScore(
-        id=str(uuid.uuid4()),
-        brokerage_id=brokerage_id,
-        user_email=payload.get("email", "external@lead.com"),
-        input_payload={**payload, "entities": ai["entities"]},
-        urgency_score=urgency,
-        sentiment=ai["sentiment"],
-        ai_recommendation=ai["recommendation"],
-        score=urgency,
-        bucket=bucket,
-        created_at=datetime.utcnow()
-    )
-
-    db.add(lead)
-    db.execute(
-        text("UPDATE brokerages SET monthly_usage = monthly_usage + 1 WHERE id=:id"),
-        {"id": brokerage_id}
-    )
-    db.commit()
-
-    return {"status": "ok", "bucket": bucket, "score": urgency}
-
-
-
-# ---------------- DASHBOARD ----------------
+# ---------------- HISTORY ----------------
 
 @app.get("/leads/history")
 def leads_history(
-    limit: int = 10,
+    limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
+
     bid = user["brokerage_id"]
 
-    q = db.query(LeadScore).filter(LeadScore.brokerage_id == bid)
-
-    total = q.count()
-
     rows = (
-        q.order_by(LeadScore.created_at.desc())
+        db.query(LeadScore)
+        .filter(LeadScore.brokerage_id == bid)
+        .order_by(LeadScore.created_at.desc())
         .limit(limit)
         .offset(offset)
         .all()
     )
 
     return {
-        "total": total,
-        "limit": limit,
-        "offset": offset,
         "data": [
             {
                 "id": r.id,
-                "lead": r.input_payload.get("text")
-                    or r.input_payload.get("message")
-                    or r.input_payload.get("subject"),
+                "lead": r.input_payload.get("message")
+                        or r.input_payload.get("text"),
                 "score": r.score,
                 "bucket": r.bucket,
                 "sentiment": r.sentiment,
                 "created_at": r.created_at.isoformat(),
-                "message": r.input_payload.get("message", ""),
                 "recommendation": r.ai_recommendation
             }
             for r in rows
-        ],
+        ]
     }
 
 
+# ---------------- DASHBOARD ----------------
 
 @app.get("/billing/usage")
 def billing_usage(user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -371,76 +455,25 @@ def billing_usage(user=Depends(get_current_user), db: Session = Depends(get_db))
 
 @app.get("/leads/stats")
 def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
+
     bid = user["brokerage_id"]
 
-    total = db.query(func.count(LeadScore.id)).filter(
-        LeadScore.brokerage_id == bid
-    ).scalar()
-
-    hot = db.query(func.count(LeadScore.id)).filter(
-        LeadScore.brokerage_id == bid, LeadScore.bucket == "HOT"
-    ).scalar()
-
-    warm = db.query(func.count(LeadScore.id)).filter(
-        LeadScore.brokerage_id == bid, LeadScore.bucket == "WARM"
-    ).scalar()
-
-    cold = db.query(func.count(LeadScore.id)).filter(
-        LeadScore.brokerage_id == bid, LeadScore.bucket == "COLD"
-    ).scalar()
-
-    avg = db.query(func.avg(LeadScore.score)).filter(
-        LeadScore.brokerage_id == bid
-    ).scalar() or 0
+    def c(q):
+        return q.scalar() or 0
 
     return {
-        "total": total,
-        "hot": hot,
-        "warm": warm,
-        "cold": cold,
-        "avg_score": round(float(avg), 2)
+        "total": c(db.query(func.count(LeadScore.id))
+                  .filter(LeadScore.brokerage_id == bid)),
+
+        "hot": c(db.query(func.count(LeadScore.id))
+                .filter(LeadScore.brokerage_id == bid,
+                        LeadScore.bucket == "HOT")),
+
+        "warm": c(db.query(func.count(LeadScore.id))
+                 .filter(LeadScore.brokerage_id == bid,
+                         LeadScore.bucket == "WARM")),
+
+        "cold": c(db.query(func.count(LeadScore.id))
+                 .filter(LeadScore.brokerage_id == bid,
+                         LeadScore.bucket == "COLD")),
     }
-
-
-@app.get("/analytics/usage")
-def usage_analytics(days: int = 30, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    bid = user["brokerage_id"]
-
-    rows = db.execute(text("""
-        SELECT DATE(created_at) as d, COUNT(*) as c
-        FROM lead_scores
-        WHERE brokerage_id = :bid
-        GROUP BY d
-        ORDER BY d
-    """), {"bid": bid}).fetchall()
-
-    return [{"date": str(r.d), "count": r.c} for r in rows]
-
-
-@app.get("/analytics/buckets")
-def bucket_analytics(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    bid = user["brokerage_id"]
-
-    rows = db.execute(text("""
-        SELECT bucket, COUNT(*) as c
-        FROM lead_scores
-        WHERE brokerage_id = :bid
-        GROUP BY bucket
-    """), {"bid": bid}).fetchall()
-
-    return {r.bucket: r.c for r in rows}
-
-
-@app.get("/analytics/scores")
-def score_analytics(days: int = 30, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    bid = user["brokerage_id"]
-
-    rows = db.execute(text("""
-        SELECT DATE(created_at) as d, AVG(score) as avg
-        FROM lead_scores
-        WHERE brokerage_id = :bid
-        GROUP BY d
-        ORDER BY d
-    """), {"bid": bid}).fetchall()
-
-    return [{"date": str(r.d), "avg": round(float(r.avg), 2)} for r in rows]
