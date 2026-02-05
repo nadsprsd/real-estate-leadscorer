@@ -4,8 +4,10 @@ import os
 import uuid
 import time
 import logging
+import json
 from datetime import datetime, timezone
 from typing import Dict
+
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -27,6 +29,7 @@ from fastapi import Header
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
+from backend.services.alerts import send_hot_alert
 
 
 # ---------------- CONFIG ----------------
@@ -202,6 +205,14 @@ def save_lead(
 
     db.add(lead)
     db.commit()
+
+    if score >=80:
+        send_hot_alert(
+            email,
+            None,
+            payload.get("message") or payload.get("text"),
+            score
+        )
 
     return lead, bucket, score
 
@@ -477,3 +488,187 @@ def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
                  .filter(LeadScore.brokerage_id == bid,
                          LeadScore.bucket == "COLD")),
     }
+
+"""
+@app.post("/inbound/email")
+async def inbound_email(request: Request, db: Session = Depends(get_db)):
+    raw = await request.body()
+    logging.info("📧 EMAIL WEBHOOK HIT")
+
+    if not raw:
+        logging.warning("⚠️ Empty request body")
+        return {"ok": True}
+
+    payload = await request.json()
+    logging.info("📨 Parsed JSON payload:")
+    logging.info(payload)
+
+    # ✅ Only process inbound emails
+    if payload.get("type") != "email.inbound":
+        logging.info("ℹ️ Ignored non-inbound event")
+        return {"ok": True}
+
+    data = payload.get("data", {})
+
+    to_list = data.get("to", [])
+    if not to_list:
+        logging.warning("❌ No TO address found")
+        return {"ok": True}
+
+    # ✅ Extract brokerage_id from email alias
+    try:
+        to_addr = to_list[0]
+        brokerage_id = to_addr.split("+")[1].split("@")[0]
+    except Exception as e:
+        logging.error(f"❌ Failed to extract brokerage_id: {e}")
+        return {"ok": True}
+
+    # ✅ VERY IMPORTANT
+    set_tenant(db, brokerage_id)
+
+    text = data.get("text") or data.get("html") or ""
+    subject = data.get("subject", "")
+
+    if not text:
+        logging.warning("⚠️ No email content to analyze")
+        return {"ok": True}
+
+    full_message = f"{subject}\n{text}"
+
+    # 🔥 AI ANALYSIS
+    ai = analyze_lead_message(full_message, "real_estate")
+
+    payload_to_save = {
+        "message": full_message,
+        "source": "email",
+        "entities": ai.get("entities")
+    }
+
+    # ✅ SAVE LEAD
+    save_lead(
+        db=db,
+        brokerage_id=brokerage_id,
+        email=data.get("from", "unknown"),
+        payload=payload_to_save,
+        ai=ai
+    )
+
+    logging.info("✅ Lead saved & AI processed")
+    return {"ok": True}
+
+    
+    
+
+# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
+
+"""
+
+# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
+
+@app.post("/inbound/email")
+async def inbound_email(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Receives inbound emails from Resend / forwarding
+    Format:
+    {
+      "data": {
+        "to": "leads+<brokerage_id>@yourdomain.com",
+        "from": "user@gmail.com",
+        "subject": "...",
+        "text": "message body"
+      }
+    }
+    """
+
+    
+# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
+
+
+
+    try:
+        data = payload.get("data", {})
+
+        to_email = data.get("to", "")
+        from_email = data.get("from", "")
+        subject = data.get("subject", "")
+        text_msg = data.get("text", "")
+
+        logging.info(f"EMAIL RECEIVED: {from_email} -> {to_email}")
+
+        # ---------------- VALIDATION ----------------
+
+        if not text_msg:
+            logging.error("Inbound email missing text")
+            raise HTTPException(400, "Email body required")
+
+        if "+" not in to_email:
+            logging.error(f"Invalid TO email: {to_email}")
+            raise HTTPException(400, "Invalid forwarding address")
+
+        # ---------------- EXTRACT BROKERAGE ID ----------------
+
+        # leads+UUID@domain.com
+        brokerage_id = to_email.split("+")[1].split("@")[0]
+
+        logging.info(f"Brokerage detected: {brokerage_id}")
+
+        # ---------------- GET INDUSTRY ----------------
+
+        row = db.execute(
+            text("SELECT industry FROM brokerages WHERE id=:i"),
+            {"i": brokerage_id}
+        ).fetchone()
+
+        industry = row.industry if row else "real_estate"
+
+        # ---------------- AI ANALYSIS ----------------
+
+        ai = analyze_lead_message(text_msg, industry)
+
+        logging.info(f"AI Result: {ai}")
+
+        # ---------------- SAVE LEAD ----------------
+
+        payload_db = {
+            "from": from_email,
+            "to": to_email,
+            "subject": subject,
+            "text": text_msg,
+            "source": "email",
+            "entities": ai.get("entities", {})
+        }
+
+        lead, bucket, score = save_lead(
+            db=db,
+            brokerage_id=brokerage_id,
+            email=from_email,
+            payload=payload_db,
+            ai=ai
+        )
+
+        logging.info(f"Email lead saved: {lead.id}")
+
+        return {
+            "status": "ok",
+            "lead_id": lead.id,
+            "bucket": bucket,
+            "score": score
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logging.exception("Inbound email failed")
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(e)
+            }
+        )

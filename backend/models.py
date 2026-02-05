@@ -14,6 +14,7 @@ class Brokerage(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
+    phone_number = Column(String(20), nullable=True)
 
     #Billing
     plan = Column(String, nullable=False, default="FREE")
