@@ -1,84 +1,21 @@
-import os
-import smtplib
-from email.mime.text import MIMEText
-from urllib.parse import quote
+# backend/services/alerts.py
+
+import logging
 
 
-APP_URL = "http://localhost:5173"
+def send_hot_alert(email: str, message: str, score: int):
+    """
+    Sends HOT lead alert (email / WhatsApp / SMS later)
+    For now: log to console
+    """
 
+    logging.info("🚨 HOT LEAD ALERT 🚨")
+    logging.info(f"To: {email}")
+    logging.info(f"Score: {score}")
+    logging.info(f"Message: {message}")
 
-# ---------------- EMAIL ALERT ----------------
-
-def send_email_alert(to_email, lead, score):
-
-    sender = os.getenv("ALERT_EMAIL")
-    password = os.getenv("ALERT_EMAIL_PASS")
-
-    if not sender or not password:
-        print("⚠️ Email alerts not configured")
-        return
-
-    subject = "🔥 HOT Lead Alert"
-
-    body = f"""
-New HOT Lead Detected!
-
-Message: {lead}
-Score: {score}
-
-Open Dashboard:
-{APP_URL}/history
-"""
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = to_email
-
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(sender, password)
-        server.send_message(msg)
-        server.quit()
-
-        print("✅ Email alert sent")
-
-    except Exception as e:
-        print("❌ Email alert failed:", e)
-
-
-# ---------------- WHATSAPP LINK ----------------
-
-def get_whatsapp_link(phone, lead, score):
-
-    text = f"""
-🔥 HOT Lead Alert
-
-{lead}
-Score: {score}
-
-Open:
-{APP_URL}/history
-"""
-
-    return f"https://wa.me/{phone}?text={quote(text)}"
-
-
-# ---------------- MAIN ALERT ----------------
-
-def send_hot_alert(user_email, phone, lead, score):
-
-    print("🚨 Sending HOT alert...")
-
-    send_email_alert(user_email, lead, score)
-
-    whatsapp = None
-
-    if phone:
-        whatsapp = get_whatsapp_link(phone, lead, score)
-
-    return {
-        "email_sent": True,
-        "whatsapp_link": whatsapp
-    }
+    print("\n🔥 NEW HOT LEAD 🔥")
+    print("To:", email)
+    print("Score:", score)
+    print("Message:", message)
+    print("-------------------\n")

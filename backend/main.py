@@ -4,17 +4,16 @@ import os
 import uuid
 import time
 import logging
-import json
 from datetime import datetime, timezone
 from typing import Dict
-
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel
 from jose import jwt, JWTError
@@ -24,7 +23,6 @@ from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 
 import stripe
-from fastapi import Header
 
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
@@ -32,24 +30,36 @@ from backend.services.ai_engine import analyze_lead_message
 from backend.services.alerts import send_hot_alert
 
 
-# ---------------- CONFIG ----------------
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 
 stripe.api_key = STRIPE_SECRET_KEY
+
+logging.basicConfig(level=logging.INFO)
 
 
 PLANS = {
     "free": {"limit": 50, "price_id": None},
     "trial": {"limit": 50, "price_id": None},
-    "starter": {"limit": 1000, "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"},
-    "team": {"limit": 5000, "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"},
+    "starter": {
+        "limit": 1000,
+        "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"
+    },
+    "team": {
+        "limit": 5000,
+        "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"
+    },
 }
 
 
-# ---------------- APP ----------------
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
 
 app = FastAPI(title="LeadScorer SaaS")
 
@@ -64,10 +74,10 @@ app.add_middleware(
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-logging.basicConfig(level=logging.INFO)
 
-
-# ---------------- SCHEMAS ----------------
+# --------------------------------------------------
+# SCHEMAS
+# --------------------------------------------------
 
 class RegisterInput(BaseModel):
     email: str
@@ -89,21 +99,23 @@ class CheckoutInput(BaseModel):
     plan: str
 
 
-# ---------------- AUTH ----------------
+# --------------------------------------------------
+# AUTH HELPERS
+# --------------------------------------------------
 
-def hash_password(p): 
+def hash_password(p):
     return pwd_context.hash(p)
 
 
-def verify_password(p, h): 
+def verify_password(p, h):
     return pwd_context.verify(p, h)
 
 
-def create_jwt(brokerage_id: str, email: str):
+def create_jwt(bid: str, email: str):
 
     payload = {
         "sub": email,
-        "brokerage_id": brokerage_id,
+        "brokerage_id": bid,
         "iat": int(time.time())
     }
 
@@ -131,22 +143,24 @@ def get_current_user(
         raise HTTPException(401, "Invalid token")
 
 
-# ---------------- BILLING ----------------
+# --------------------------------------------------
+# BILLING
+# --------------------------------------------------
 
-def get_billing_status(db: Session, brokerage_id: str) -> Dict:
+def get_billing_status(db: Session, bid: str) -> Dict:
 
     row = db.execute(text("""
-        SELECT COUNT(*) 
+        SELECT COUNT(*)
         FROM lead_scores
         WHERE brokerage_id=:id
           AND created_at >= date_trunc('month', NOW())
-    """), {"id": brokerage_id}).fetchone()
+    """), {"id": bid}).fetchone()
 
     usage = row[0] if row else 0
 
     plan_row = db.execute(
         text("SELECT plan FROM brokerages WHERE id=:id"),
-        {"id": brokerage_id}
+        {"id": bid}
     ).fetchone()
 
     plan = (plan_row.plan or "free").lower()
@@ -168,7 +182,9 @@ def get_billing_status(db: Session, brokerage_id: str) -> Dict:
     }
 
 
-# ---------------- CORE SAVE ----------------
+# --------------------------------------------------
+# CORE SAVE
+# --------------------------------------------------
 
 def save_lead(
     db: Session,
@@ -206,18 +222,23 @@ def save_lead(
     db.add(lead)
     db.commit()
 
-    if score >=80:
+    # HOT alert
+    if bucket == "HOT":
+
+        msg = payload.get("message") or payload.get("text", "")
+
         send_hot_alert(
             email,
-            None,
-            payload.get("message") or payload.get("text"),
+            msg,
             score
         )
 
     return lead, bucket, score
 
 
-# ---------------- AUTH ROUTES ----------------
+# --------------------------------------------------
+# AUTH
+# --------------------------------------------------
 
 @app.post("/auth/register")
 def register(data: RegisterInput, db: Session = Depends(get_db)):
@@ -264,10 +285,17 @@ def login(data: LoginInput, db: Session = Depends(get_db)):
     if not row or not verify_password(data.password, row.hashed_password):
         raise HTTPException(401, "Invalid login")
 
-    return {"access_token": create_jwt(str(row.brokerage_id), data.email)}
+    return {
+        "access_token": create_jwt(
+            str(row.brokerage_id),
+            data.email
+        )
+    }
 
 
-# ---------------- STRIPE ----------------
+# --------------------------------------------------
+# STRIPE
+# --------------------------------------------------
 
 @app.post("/billing/checkout")
 def checkout(
@@ -283,17 +311,21 @@ def checkout(
     price_id = PLANS[plan]["price_id"]
 
     if not price_id:
-        raise HTTPException(400, "Plan not payable")
+        raise HTTPException(400, "Not payable")
 
     session = stripe.checkout.Session.create(
         mode="subscription",
+
         line_items=[{
             "price": price_id,
             "quantity": 1
         }],
+
         success_url="http://localhost:5173/dashboard?paid=1",
         cancel_url="http://localhost:5173/billing?cancel=1",
+
         customer_email=user["sub"],
+
         metadata={
             "brokerage_id": user["brokerage_id"],
             "plan": plan
@@ -303,15 +335,13 @@ def checkout(
     return {"checkout_url": session.url}
 
 
-
-#Stripe webhook
-
 @app.post("/billing/webhook")
 async def stripe_webhook(
     request: Request,
     stripe_signature: str = Header(None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
+
     payload = await request.body()
 
     try:
@@ -321,58 +351,39 @@ async def stripe_webhook(
             STRIPE_WEBHOOK_SECRET
         )
     except Exception as e:
-        logging.error(f"Stripe webhook error: {e}")
-        raise HTTPException(status_code=400, detail="Webhook error")
+        logging.error(e)
+        raise HTTPException(400, "Webhook error")
 
     event_type = event["type"]
     data = event["data"]["object"]
 
-    logging.info(f"Stripe event received: {event_type}")
+    if event_type == "checkout.session.completed":
 
-    # ✅ PAYMENT SUCCESS → ACTIVATE PLAN
-    if event_type in (
-        "checkout.session.completed",
-        "invoice.payment_succeeded",
-    ):
-        customer_id = data.get("customer")
-        subscription_id = data.get("subscription")
+        meta = data.get("metadata", {})
 
-        # Metadata is only present on checkout.session
-        metadata = data.get("metadata", {})
-        brokerage_id = metadata.get("brokerage_id")
-        plan = metadata.get("plan")
+        bid = meta.get("brokerage_id")
+        plan = meta.get("plan")
 
-        if not brokerage_id:
-            logging.warning("Missing brokerage_id in webhook")
+        if not bid:
             return {"status": "ignored"}
 
         db.execute(text("""
             UPDATE brokerages
-            SET
-                plan = :plan,
-                subscription_status = 'active',
-                stripe_customer_id = :cust,
-                stripe_subscription_id = :sub
-            WHERE id = :bid
+            SET plan=:p, subscription_status='active'
+            WHERE id=:i
         """), {
-            "plan": plan,
-            "cust": customer_id,
-            "sub": subscription_id,
-            "bid": brokerage_id
+            "p": plan,
+            "i": bid
         })
 
         db.commit()
 
-        logging.info(
-            f"Brokerage {brokerage_id} upgraded to {plan}"
-        )
-
     return {"status": "ok"}
 
 
-
-
-# ---------------- SCORE ----------------
+# --------------------------------------------------
+# SCORE
+# --------------------------------------------------
 
 @app.post("/leads/score")
 def score_lead(
@@ -381,7 +392,10 @@ def score_lead(
     db: Session = Depends(get_db)
 ):
 
-    billing = get_billing_status(db, user["brokerage_id"])
+    billing = get_billing_status(
+        db,
+        user["brokerage_id"]
+    )
 
     if billing["blocked"]:
         raise HTTPException(402, "Quota exceeded")
@@ -393,7 +407,10 @@ def score_lead(
 
     industry = row.industry if row else "real_estate"
 
-    ai = analyze_lead_message(lead.message, industry)
+    ai = analyze_lead_message(
+        lead.message,
+        industry
+    )
 
     payload = {
         "message": lead.message,
@@ -401,7 +418,7 @@ def score_lead(
         "entities": ai["entities"]
     }
 
-    record, bucket, score = save_lead(
+    lead_obj, bucket, score = save_lead(
         db,
         user["brokerage_id"],
         user["sub"],
@@ -415,11 +432,132 @@ def score_lead(
         "sentiment": ai["sentiment"],
         "entities": ai["entities"],
         "ai_recommendation": ai["recommendation"],
-        "billing": get_billing_status(db, user["brokerage_id"])
+        "billing": get_billing_status(
+            db,
+            user["brokerage_id"]
+        )
     }
 
 
-# ---------------- HISTORY ----------------
+# --------------------------------------------------
+# EMAIL INBOUND (RESEND / FORWARD)
+# --------------------------------------------------
+
+@app.post("/inbound/email")
+async def inbound_email(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+
+    try:
+
+        data = payload.get("data", {})
+
+        to_email = data.get("to", "")
+        from_email = data.get("from", "")
+        subject = data.get("subject", "")
+        text_msg = data.get("text", "")
+
+        if not text_msg:
+            raise HTTPException(400, "No text")
+
+        if "+" not in to_email:
+            raise HTTPException(400, "Invalid address")
+
+        brokerage_id = to_email.split("+")[1].split("@")[0]
+
+        row = db.execute(
+            text("SELECT industry FROM brokerages WHERE id=:i"),
+            {"i": brokerage_id}
+        ).fetchone()
+
+        industry = row.industry if row else "real_estate"
+
+        full_msg = f"{subject}\n{text_msg}"
+
+        ai = analyze_lead_message(
+            full_msg,
+            industry
+        )
+
+        payload_db = {
+            "message": full_msg,
+            "source": "email",
+            "entities": ai["entities"]
+        }
+
+        lead, bucket, score = save_lead(
+            db,
+            brokerage_id,
+            from_email,
+            payload_db,
+            ai
+        )
+
+        return {
+            "status": "ok",
+            "bucket": bucket,
+            "score": score
+        }
+
+    except Exception as e:
+
+        logging.exception("Inbound email failed")
+
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+# --------------------------------------------------
+# WEBHOOK (FORMS / CRM / ADS)
+# --------------------------------------------------
+
+@app.post("/inbound/{brokerage_id}")
+async def inbound_webhook(
+    brokerage_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+
+    payload = await request.json()
+
+    message = payload.get("message")
+
+    if not message:
+        raise HTTPException(400, "Message required")
+
+    row = db.execute(
+        text("SELECT industry FROM brokerages WHERE id=:i"),
+        {"i": brokerage_id}
+    ).fetchone()
+
+    industry = row.industry if row else "real_estate"
+
+    ai = analyze_lead_message(
+        message,
+        industry
+    )
+
+    lead, bucket, score = save_lead(
+        db,
+        brokerage_id,
+        payload.get("email", "external@lead.com"),
+        payload,
+        ai
+    )
+
+    return {
+        "status": "ok",
+        "bucket": bucket,
+        "score": score
+    }
+
+
+# --------------------------------------------------
+# HISTORY / DASHBOARD
+# --------------------------------------------------
 
 @app.get("/leads/history")
 def leads_history(
@@ -444,8 +582,7 @@ def leads_history(
         "data": [
             {
                 "id": r.id,
-                "lead": r.input_payload.get("message")
-                        or r.input_payload.get("text"),
+                "lead": r.input_payload.get("message"),
                 "score": r.score,
                 "bucket": r.bucket,
                 "sentiment": r.sentiment,
@@ -457,15 +594,22 @@ def leads_history(
     }
 
 
-# ---------------- DASHBOARD ----------------
-
 @app.get("/billing/usage")
-def billing_usage(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    return get_billing_status(db, user["brokerage_id"])
+def billing_usage(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return get_billing_status(
+        db,
+        user["brokerage_id"]
+    )
 
 
 @app.get("/leads/stats")
-def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
+def leads_stats(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
 
     bid = user["brokerage_id"]
 
@@ -473,202 +617,33 @@ def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
         return q.scalar() or 0
 
     return {
-        "total": c(db.query(func.count(LeadScore.id))
-                  .filter(LeadScore.brokerage_id == bid)),
 
-        "hot": c(db.query(func.count(LeadScore.id))
-                .filter(LeadScore.brokerage_id == bid,
-                        LeadScore.bucket == "HOT")),
+        "total": c(
+            db.query(func.count(LeadScore.id))
+            .filter(LeadScore.brokerage_id == bid)
+        ),
 
-        "warm": c(db.query(func.count(LeadScore.id))
-                 .filter(LeadScore.brokerage_id == bid,
-                         LeadScore.bucket == "WARM")),
+        "hot": c(
+            db.query(func.count(LeadScore.id))
+            .filter(
+                LeadScore.brokerage_id == bid,
+                LeadScore.bucket == "HOT"
+            )
+        ),
 
-        "cold": c(db.query(func.count(LeadScore.id))
-                 .filter(LeadScore.brokerage_id == bid,
-                         LeadScore.bucket == "COLD")),
+        "warm": c(
+            db.query(func.count(LeadScore.id))
+            .filter(
+                LeadScore.brokerage_id == bid,
+                LeadScore.bucket == "WARM"
+            )
+        ),
+
+        "cold": c(
+            db.query(func.count(LeadScore.id))
+            .filter(
+                LeadScore.brokerage_id == bid,
+                LeadScore.bucket == "COLD"
+            )
+        ),
     }
-
-"""
-@app.post("/inbound/email")
-async def inbound_email(request: Request, db: Session = Depends(get_db)):
-    raw = await request.body()
-    logging.info("📧 EMAIL WEBHOOK HIT")
-
-    if not raw:
-        logging.warning("⚠️ Empty request body")
-        return {"ok": True}
-
-    payload = await request.json()
-    logging.info("📨 Parsed JSON payload:")
-    logging.info(payload)
-
-    # ✅ Only process inbound emails
-    if payload.get("type") != "email.inbound":
-        logging.info("ℹ️ Ignored non-inbound event")
-        return {"ok": True}
-
-    data = payload.get("data", {})
-
-    to_list = data.get("to", [])
-    if not to_list:
-        logging.warning("❌ No TO address found")
-        return {"ok": True}
-
-    # ✅ Extract brokerage_id from email alias
-    try:
-        to_addr = to_list[0]
-        brokerage_id = to_addr.split("+")[1].split("@")[0]
-    except Exception as e:
-        logging.error(f"❌ Failed to extract brokerage_id: {e}")
-        return {"ok": True}
-
-    # ✅ VERY IMPORTANT
-    set_tenant(db, brokerage_id)
-
-    text = data.get("text") or data.get("html") or ""
-    subject = data.get("subject", "")
-
-    if not text:
-        logging.warning("⚠️ No email content to analyze")
-        return {"ok": True}
-
-    full_message = f"{subject}\n{text}"
-
-    # 🔥 AI ANALYSIS
-    ai = analyze_lead_message(full_message, "real_estate")
-
-    payload_to_save = {
-        "message": full_message,
-        "source": "email",
-        "entities": ai.get("entities")
-    }
-
-    # ✅ SAVE LEAD
-    save_lead(
-        db=db,
-        brokerage_id=brokerage_id,
-        email=data.get("from", "unknown"),
-        payload=payload_to_save,
-        ai=ai
-    )
-
-    logging.info("✅ Lead saved & AI processed")
-    return {"ok": True}
-
-    
-    
-
-# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
-
-"""
-
-# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
-
-@app.post("/inbound/email")
-async def inbound_email(
-    payload: dict,
-    db: Session = Depends(get_db)
-):
-    """
-    Receives inbound emails from Resend / forwarding
-    Format:
-    {
-      "data": {
-        "to": "leads+<brokerage_id>@yourdomain.com",
-        "from": "user@gmail.com",
-        "subject": "...",
-        "text": "message body"
-      }
-    }
-    """
-
-    
-# ---------------- EMAIL INBOUND (RESEND / FORWARDING) ----------------
-
-
-
-    try:
-        data = payload.get("data", {})
-
-        to_email = data.get("to", "")
-        from_email = data.get("from", "")
-        subject = data.get("subject", "")
-        text_msg = data.get("text", "")
-
-        logging.info(f"EMAIL RECEIVED: {from_email} -> {to_email}")
-
-        # ---------------- VALIDATION ----------------
-
-        if not text_msg:
-            logging.error("Inbound email missing text")
-            raise HTTPException(400, "Email body required")
-
-        if "+" not in to_email:
-            logging.error(f"Invalid TO email: {to_email}")
-            raise HTTPException(400, "Invalid forwarding address")
-
-        # ---------------- EXTRACT BROKERAGE ID ----------------
-
-        # leads+UUID@domain.com
-        brokerage_id = to_email.split("+")[1].split("@")[0]
-
-        logging.info(f"Brokerage detected: {brokerage_id}")
-
-        # ---------------- GET INDUSTRY ----------------
-
-        row = db.execute(
-            text("SELECT industry FROM brokerages WHERE id=:i"),
-            {"i": brokerage_id}
-        ).fetchone()
-
-        industry = row.industry if row else "real_estate"
-
-        # ---------------- AI ANALYSIS ----------------
-
-        ai = analyze_lead_message(text_msg, industry)
-
-        logging.info(f"AI Result: {ai}")
-
-        # ---------------- SAVE LEAD ----------------
-
-        payload_db = {
-            "from": from_email,
-            "to": to_email,
-            "subject": subject,
-            "text": text_msg,
-            "source": "email",
-            "entities": ai.get("entities", {})
-        }
-
-        lead, bucket, score = save_lead(
-            db=db,
-            brokerage_id=brokerage_id,
-            email=from_email,
-            payload=payload_db,
-            ai=ai
-        )
-
-        logging.info(f"Email lead saved: {lead.id}")
-
-        return {
-            "status": "ok",
-            "lead_id": lead.id,
-            "bucket": bucket,
-            "score": score
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-
-        logging.exception("Inbound email failed")
-
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "message": str(e)
-            }
-        )
