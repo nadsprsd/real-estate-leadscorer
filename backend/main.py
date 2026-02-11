@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict
 
 from dotenv import load_dotenv
-load_dotenv()
+
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -21,8 +21,13 @@ from passlib.context import CryptContext
 
 from sqlalchemy import text, func
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 import stripe
+import json
+import asyncio
+import httpx
+
 
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
@@ -30,15 +35,154 @@ from backend.services.ai_engine import analyze_lead_message
 from backend.services.alerts import send_hot_alert
 
 
+
+
+
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
+load_dotenv()
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+FROM_EMAIL= os.getenv("FROM_EMAIL")
+
 stripe.api_key = STRIPE_SECRET_KEY
+
+
+#Fetching Email
+
+
+async def fetch_email_with_retry(email_id: str, max_retries: int = 3):
+    for attempt in range(max_retries):
+        async with httpx.AsyncClient() as client:
+            res = await client.get(
+                f"https://api.resend.com/emails/receiving/{email_id}",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}"
+                },
+                timeout=10
+            )
+
+        if res.status_code == 200:
+            return res.json()
+
+        if res.status_code == 404 and attempt < max_retries - 1:
+            await asyncio.sleep(1)
+            continue
+
+        logging.error(f"Fetch failed: {res.status_code} {res.text}")
+        return None
+
+    return None
+
+
+#Background Processor
+
+
+async def process_inbound_email(data: dict, db: Session):
+    try:
+        email_id = data.get("email_id")
+        if not email_id:
+            logging.warning("❌ Missing email_id")
+            return
+
+        to_raw = data.get("to")
+        if isinstance(to_raw, list) and to_raw:
+            to_email = to_raw[0]
+        elif isinstance(to_raw, str):
+            to_email = to_raw
+        else:
+            logging.warning("❌ Missing TO field")
+            return
+
+        from_email = data.get("from", "")
+        subject = data.get("subject", "")
+
+        email_full = await fetch_email_with_retry(email_id)
+
+        if not email_full:
+            logging.error("❌ Could not retrieve email body")
+            return
+
+        text_msg = (
+            email_full.get("text")
+            or email_full.get("html")
+            or ""
+        )
+
+        if not text_msg.strip():
+            logging.warning("❌ Email body empty")
+            return
+
+        if "+" not in to_email:
+            logging.warning(f"❌ Invalid alias: {to_email}")
+            return
+
+        brokerage_id = to_email.split("+")[1].split("@")[0]
+
+        # 🔹 Get industry
+        row = db.execute(
+    text("""
+        SELECT b.industry, u.email
+        FROM brokerages b
+        JOIN users u ON u.brokerage_id = b.id
+        WHERE b.id = :i
+        LIMIT 1
+    """),
+    {"i": brokerage_id}
+).fetchone()
+
+        if not row:
+            logging.warning("❌ Brokerage or users not found")
+            return
+
+        industry = row.industry
+        brokerage_email = row.email
+
+        logging.info(f"🏢 Brokerage ID: {brokerage_id}")
+        logging.info(f"📨 Sending alert to: {brokerage_email}")
+
+        # 🔹 AI analysis
+        full_message = f"{subject}\n\n{text_msg}"
+        ai = analyze_lead_message(full_message, industry)
+
+        # 🔹 Save lead
+        payload_db = {
+            "message": full_message,
+            "from": from_email,
+            "to": to_email,
+            "subject": subject,
+            "source": "email",
+            "entities": ai.get("entities", {})
+        }
+
+        lead, bucket, score = save_lead(
+            db,
+            brokerage_id,
+            from_email,
+            payload_db,
+            ai
+        )
+
+        logging.info(f"✅ Lead saved: {lead.id}")
+
+        # 🔥 SEND ALERT TO BROKERAGE OWNER
+       
+
+        send_hot_alert(
+            brokerage_email,
+            full_message,
+            ai["urgency_score"]
+        )
+
+    except Exception as e:
+        logging.exception(f"❌ Processing failed: {str(e)}")
+
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -443,71 +587,31 @@ def score_lead(
 # EMAIL INBOUND (RESEND / FORWARD)
 # --------------------------------------------------
 
+
 @app.post("/inbound/email")
 async def inbound_email(
-    payload: dict,
+    request: Request,
     db: Session = Depends(get_db)
 ):
-
     try:
+        payload = await request.json()
+        logging.info("📧 Inbound email webhook received")
 
         data = payload.get("data", {})
 
-        to_email = data.get("to", "")
-        from_email = data.get("from", "")
-        subject = data.get("subject", "")
-        text_msg = data.get("text", "")
+        # 🔥 THIS LINE runs processor in background
+        asyncio.create_task(process_inbound_email(data, db))
 
-        if not text_msg:
-            raise HTTPException(400, "No text")
-
-        if "+" not in to_email:
-            raise HTTPException(400, "Invalid address")
-
-        brokerage_id = to_email.split("+")[1].split("@")[0]
-
-        row = db.execute(
-            text("SELECT industry FROM brokerages WHERE id=:i"),
-            {"i": brokerage_id}
-        ).fetchone()
-
-        industry = row.industry if row else "real_estate"
-
-        full_msg = f"{subject}\n{text_msg}"
-
-        ai = analyze_lead_message(
-            full_msg,
-            industry
-        )
-
-        payload_db = {
-            "message": full_msg,
-            "source": "email",
-            "entities": ai["entities"]
-        }
-
-        lead, bucket, score = save_lead(
-            db,
-            brokerage_id,
-            from_email,
-            payload_db,
-            ai
-        )
-
-        return {
-            "status": "ok",
-            "bucket": bucket,
-            "score": score
-        }
+        # 🔥 Immediate response prevents duplicate webhook retries
+        return {"ok": True}
 
     except Exception as e:
-
-        logging.exception("Inbound email failed")
-
+        logging.exception("❌ Webhook failed")
         return JSONResponse(
             status_code=500,
-            content={"error": str(e)}
+            content={"status": "error", "message": str(e)}
         )
+
 
 
 # --------------------------------------------------
