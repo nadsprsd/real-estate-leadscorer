@@ -4,11 +4,11 @@ import os
 import uuid
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict
 
 from dotenv import load_dotenv
-
+load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -21,183 +21,39 @@ from passlib.context import CryptContext
 
 from sqlalchemy import text, func
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 import stripe
-import json
-import asyncio
-import httpx
-
+import requests
 
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
 from backend.services.alerts import send_hot_alert
-
-
-
+from backend.services.email_verify import send_verify_email
 
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
-load_dotenv()
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-FROM_EMAIL= os.getenv("FROM_EMAIL")
-
 stripe.api_key = STRIPE_SECRET_KEY
-
-
-#Fetching Email
-
-
-async def fetch_email_with_retry(email_id: str, max_retries: int = 3):
-    for attempt in range(max_retries):
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"https://api.resend.com/emails/receiving/{email_id}",
-                headers={
-                    "Authorization": f"Bearer {RESEND_API_KEY}"
-                },
-                timeout=10
-            )
-
-        if res.status_code == 200:
-            return res.json()
-
-        if res.status_code == 404 and attempt < max_retries - 1:
-            await asyncio.sleep(1)
-            continue
-
-        logging.error(f"Fetch failed: {res.status_code} {res.text}")
-        return None
-
-    return None
-
-
-#Background Processor
-
-
-async def process_inbound_email(data: dict, db: Session):
-    try:
-        email_id = data.get("email_id")
-        if not email_id:
-            logging.warning("❌ Missing email_id")
-            return
-
-        to_raw = data.get("to")
-        if isinstance(to_raw, list) and to_raw:
-            to_email = to_raw[0]
-        elif isinstance(to_raw, str):
-            to_email = to_raw
-        else:
-            logging.warning("❌ Missing TO field")
-            return
-
-        from_email = data.get("from", "")
-        subject = data.get("subject", "")
-
-        email_full = await fetch_email_with_retry(email_id)
-
-        if not email_full:
-            logging.error("❌ Could not retrieve email body")
-            return
-
-        text_msg = (
-            email_full.get("text")
-            or email_full.get("html")
-            or ""
-        )
-
-        if not text_msg.strip():
-            logging.warning("❌ Email body empty")
-            return
-
-        if "+" not in to_email:
-            logging.warning(f"❌ Invalid alias: {to_email}")
-            return
-
-        brokerage_id = to_email.split("+")[1].split("@")[0]
-
-        # 🔹 Get industry
-        row = db.execute(
-    text("""
-        SELECT b.industry, u.email
-        FROM brokerages b
-        JOIN users u ON u.brokerage_id = b.id
-        WHERE b.id = :i
-        LIMIT 1
-    """),
-    {"i": brokerage_id}
-).fetchone()
-
-        if not row:
-            logging.warning("❌ Brokerage or users not found")
-            return
-
-        industry = row.industry
-        brokerage_email = row.email
-
-        logging.info(f"🏢 Brokerage ID: {brokerage_id}")
-        logging.info(f"📨 Sending alert to: {brokerage_email}")
-
-        # 🔹 AI analysis
-        full_message = f"{subject}\n\n{text_msg}"
-        ai = analyze_lead_message(full_message, industry)
-
-        # 🔹 Save lead
-        payload_db = {
-            "message": full_message,
-            "from": from_email,
-            "to": to_email,
-            "subject": subject,
-            "source": "email",
-            "entities": ai.get("entities", {})
-        }
-
-        lead, bucket, score = save_lead(
-            db,
-            brokerage_id,
-            from_email,
-            payload_db,
-            ai
-        )
-
-        logging.info(f"✅ Lead saved: {lead.id}")
-
-        # 🔥 SEND ALERT TO BROKERAGE OWNER
-       
-
-        send_hot_alert(
-            brokerage_email,
-            full_message,
-            ai["urgency_score"]
-        )
-
-    except Exception as e:
-        logging.exception(f"❌ Processing failed: {str(e)}")
-
-
 
 logging.basicConfig(level=logging.INFO)
 
 
+# --------------------------------------------------
+# PLANS
+# --------------------------------------------------
+
 PLANS = {
     "free": {"limit": 50, "price_id": None},
     "trial": {"limit": 50, "price_id": None},
-    "starter": {
-        "limit": 1000,
-        "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"
-    },
-    "team": {
-        "limit": 5000,
-        "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"
-    },
+    "starter": {"limit": 1000, "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"},
+    "team": {"limit": 5000, "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"},
 }
 
 
@@ -227,6 +83,7 @@ class RegisterInput(BaseModel):
     email: str
     password: str
     brokerage_name: str
+    industry:str
 
 
 class LoginInput(BaseModel):
@@ -337,25 +194,39 @@ def save_lead(
     payload: dict,
     ai: dict
 ):
+    # -----------------------------
+    # Normalize lead intent
+    # -----------------------------
+    is_lead = ai.get("is_lead", False)
+    score = int(ai.get("urgency_score", 0))
 
-    score = ai["urgency_score"]
+    if not is_lead:
+        score = 0
+        bucket = "IGNORE"
+    else:
+        if score >= 80:
+            bucket = "HOT"
+        elif score >= 50:
+            bucket = "WARM"
+        else:
+            bucket = "COLD"
 
-    bucket = (
-        "HOT" if score >= 80
-        else "WARM" if score >= 50
-        else "COLD"
-    )
-
+    # -----------------------------
+    # Persist lead (even IGNORE)
+    # -----------------------------
     lead = LeadScore(
         id=str(uuid.uuid4()),
         brokerage_id=brokerage_id,
         user_email=email,
 
-        input_payload=payload,
+        input_payload={
+            **payload,
+            "is_lead": is_lead   # 👈 STORE HERE
+        },
 
-        urgency_score=score,
-        sentiment=ai["sentiment"],
-        ai_recommendation=ai["recommendation"],
+        urgency_score=score if is_lead else None,
+        sentiment=ai.get("sentiment"),
+        ai_recommendation=ai.get("recommendation"),
 
         score=score,
         bucket=bucket,
@@ -366,22 +237,18 @@ def save_lead(
     db.add(lead)
     db.commit()
 
-    # HOT alert
+    # -----------------------------
+    # Alerts (HOT leads only)
+    # -----------------------------
     if bucket == "HOT":
-
         msg = payload.get("message") or payload.get("text", "")
-
-        send_hot_alert(
-            email,
-            msg,
-            score
-        )
+        send_hot_alert(email, msg, score)
 
     return lead, bucket, score
 
 
 # --------------------------------------------------
-# AUTH
+# AUTH (Register)
 # --------------------------------------------------
 
 @app.post("/auth/register")
@@ -393,19 +260,23 @@ def register(data: RegisterInput, db: Session = Depends(get_db)):
     ).fetchone()
 
     if exists:
-        raise HTTPException(400, "Email exists")
+        raise HTTPException(400, "Email already exists")
 
     bid = str(uuid.uuid4())
     uid = str(uuid.uuid4())
 
     db.execute(text("""
-        INSERT INTO brokerages (id,name,plan,industry)
-        VALUES (:i,:n,'trial','real_estate')
-    """), {"i": bid, "n": data.brokerage_name})
+        INSERT INTO brokerages (id, name, plan, industry)
+        VALUES (:i, :n, 'trial', :ind)
+    """), {
+        "i": bid,
+        "n": data.brokerage_name,
+        "ind": data.industry
+    })
 
     db.execute(text("""
-        INSERT INTO users (id,email,hashed_password,brokerage_id)
-        VALUES (:i,:e,:p,:b)
+        INSERT INTO users (id, email, hashed_password, brokerage_id)
+        VALUES (:i, :e, :p, :b)
     """), {
         "i": uid,
         "e": data.email,
@@ -413,28 +284,57 @@ def register(data: RegisterInput, db: Session = Depends(get_db)):
         "b": bid
     })
 
+    # ✅ Send email + get token
+    token = send_verify_email(data.email)
+
+    db.execute(text("""
+        INSERT INTO email_verifications
+        (id, email, token, expires_at, verified)
+        VALUES (:i, :e, :t, :x, false)
+    """), {
+        "i": str(uuid.uuid4()),
+        "e": data.email,
+        "t": token,
+        "x": datetime.utcnow() + timedelta(hours=24)
+    })
+
     db.commit()
 
-    return {"access_token": create_jwt(bid, data.email)}
+    return {
+        "status": "verification_sent",
+        "message": "Check your email to verify your account"
+    }
+
+
+
+# --------------------------------------------------
+# Login
+# --------------------------------------------------
 
 
 @app.post("/auth/login")
 def login(data: LoginInput, db: Session = Depends(get_db)):
 
-    row = db.execute(text("""
-        SELECT hashed_password, brokerage_id
-        FROM users WHERE email=:e
+    user = db.execute(text("""
+        SELECT u.hashed_password, u.brokerage_id, ev.verified
+        FROM users u
+        LEFT JOIN email_verifications ev ON ev.email = u.email
+        WHERE u.email=:e
     """), {"e": data.email}).fetchone()
 
-    if not row or not verify_password(data.password, row.hashed_password):
-        raise HTTPException(401, "Invalid login")
+    if not user or not verify_password(data.password, user.hashed_password):
+        raise HTTPException(401, "Invalid credentials")
+
+    if not user.verified:
+        raise HTTPException(403, "Please verify your email first")
 
     return {
         "access_token": create_jwt(
-            str(row.brokerage_id),
+            str(user.brokerage_id),
             data.email
         )
     }
+
 
 
 # --------------------------------------------------
@@ -479,6 +379,12 @@ def checkout(
     return {"checkout_url": session.url}
 
 
+
+# --------------------------------------------------
+# Billing /Webhook
+# --------------------------------------------------
+
+
 @app.post("/billing/webhook")
 async def stripe_webhook(
     request: Request,
@@ -494,33 +400,29 @@ async def stripe_webhook(
             stripe_signature,
             STRIPE_WEBHOOK_SECRET
         )
-    except Exception as e:
-        logging.error(e)
+    except Exception:
         raise HTTPException(400, "Webhook error")
 
-    event_type = event["type"]
     data = event["data"]["object"]
 
-    if event_type == "checkout.session.completed":
+    if event["type"] == "checkout.session.completed":
 
         meta = data.get("metadata", {})
 
         bid = meta.get("brokerage_id")
         plan = meta.get("plan")
 
-        if not bid:
-            return {"status": "ignored"}
+        if bid:
+            db.execute(text("""
+                UPDATE brokerages
+                SET plan=:p, subscription_status='active'
+                WHERE id=:i
+            """), {
+                "p": plan,
+                "i": bid
+            })
 
-        db.execute(text("""
-            UPDATE brokerages
-            SET plan=:p, subscription_status='active'
-            WHERE id=:i
-        """), {
-            "p": plan,
-            "i": bid
-        })
-
-        db.commit()
+            db.commit()
 
     return {"status": "ok"}
 
@@ -536,11 +438,7 @@ def score_lead(
     db: Session = Depends(get_db)
 ):
 
-    billing = get_billing_status(
-        db,
-        user["brokerage_id"]
-    )
-
+    billing = get_billing_status(db, user["brokerage_id"])
     if billing["blocked"]:
         raise HTTPException(402, "Quota exceeded")
 
@@ -551,15 +449,25 @@ def score_lead(
 
     industry = row.industry if row else "real_estate"
 
-    ai = analyze_lead_message(
-        lead.message,
-        industry
-    )
+    ai = analyze_lead_message(lead.message, industry)
+
+    #  ANTI-MISLEADING LOGIC 
+
+    if not ai.get("is_lead", False):
+        return {
+            "score": 0,
+            "bucket": "IGNORE",
+            "sentiment": ai.get("sentiment", "neutral"),
+            "recommendation": ai.get("recommendation", ""),
+            "billing": get_billing_status(db, user["brokerage_id"])
+        }
+
+    #Only REAL leads
 
     payload = {
         "message": lead.message,
         "source": lead.source,
-        "entities": ai["entities"]
+        "entities": ai.get("entities", {})
     }
 
     lead_obj, bucket, score = save_lead(
@@ -574,63 +482,44 @@ def score_lead(
         "score": score,
         "bucket": bucket,
         "sentiment": ai["sentiment"],
-        "entities": ai["entities"],
-        "ai_recommendation": ai["recommendation"],
-        "billing": get_billing_status(
-            db,
-            user["brokerage_id"]
-        )
+        "recommendation": ai["recommendation"],
+        "billing": get_billing_status(db, user["brokerage_id"])
     }
 
 
-# --------------------------------------------------
-# EMAIL INBOUND (RESEND / FORWARD)
-# --------------------------------------------------
 
+# --------------------------------------------------
+# EMAIL INBOUND (SYNC SAFE)
+# --------------------------------------------------
 
 @app.post("/inbound/email")
 async def inbound_email(
-    request: Request,
+    payload: dict,
     db: Session = Depends(get_db)
 ):
-    try:
-        payload = await request.json()
-        logging.info("📧 Inbound email webhook received")
 
-        data = payload.get("data", {})
+    logging.info("📧 Inbound email received")
 
-        # 🔥 THIS LINE runs processor in background
-        asyncio.create_task(process_inbound_email(data, db))
+    data = payload.get("data", {})
 
-        # 🔥 Immediate response prevents duplicate webhook retries
+    to_list = data.get("to", [])
+    from_email = data.get("from", "")
+    subject = data.get("subject", "")
+    text_msg = data.get("text", "")
+
+    if not text_msg:
+        logging.warning("No email body")
         return {"ok": True}
 
-    except Exception as e:
-        logging.exception("❌ Webhook failed")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
+    if not to_list:
+        return {"ok": True}
 
+    to_email = to_list[0]
 
+    if "+" not in to_email:
+        return {"ok": True}
 
-# --------------------------------------------------
-# WEBHOOK (FORMS / CRM / ADS)
-# --------------------------------------------------
-
-@app.post("/inbound/{brokerage_id}")
-async def inbound_webhook(
-    brokerage_id: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-
-    payload = await request.json()
-
-    message = payload.get("message")
-
-    if not message:
-        raise HTTPException(400, "Message required")
+    brokerage_id = to_email.split("+")[1].split("@")[0]
 
     row = db.execute(
         text("SELECT industry FROM brokerages WHERE id=:i"),
@@ -639,24 +528,24 @@ async def inbound_webhook(
 
     industry = row.industry if row else "real_estate"
 
-    ai = analyze_lead_message(
-        message,
-        industry
-    )
+    full_msg = f"{subject}\n\n{text_msg}"
 
-    lead, bucket, score = save_lead(
+    ai = analyze_lead_message(full_msg, industry)
+
+    payload_db = {
+        "message": full_msg,
+        "source": "email"
+    }
+
+    save_lead(
         db,
         brokerage_id,
-        payload.get("email", "external@lead.com"),
-        payload,
+        from_email,
+        payload_db,
         ai
     )
 
-    return {
-        "status": "ok",
-        "bucket": bucket,
-        "score": score
-    }
+    return {"ok": True}
 
 
 # --------------------------------------------------
@@ -689,7 +578,6 @@ def leads_history(
                 "lead": r.input_payload.get("message"),
                 "score": r.score,
                 "bucket": r.bucket,
-                "sentiment": r.sentiment,
                 "created_at": r.created_at.isoformat(),
                 "recommendation": r.ai_recommendation
             }
@@ -698,16 +586,21 @@ def leads_history(
     }
 
 
+# --------------------------------------------------
+# Billing / usage
+# --------------------------------------------------
+
 @app.get("/billing/usage")
 def billing_usage(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    return get_billing_status(
-        db,
-        user["brokerage_id"]
-    )
+    return get_billing_status(db, user["brokerage_id"])
 
+
+# --------------------------------------------------
+# Stats-Leads / DASHBOARD
+# --------------------------------------------------
 
 @app.get("/leads/stats")
 def leads_stats(
@@ -751,3 +644,30 @@ def leads_stats(
             )
         ),
     }
+
+# --------------------------------------------------
+# Email Verify 
+# --------------------------------------------------
+
+
+@app.get("/auth/verify")
+def verify_email(token: str, db: Session = Depends(get_db)):
+
+    row = db.execute(text("""
+        SELECT email
+        FROM email_verifications
+        WHERE token=:t AND expires_at > NOW() AND verified=false
+    """), {"t": token}).fetchone()
+
+    if not row:
+        raise HTTPException(400, "Invalid or expired token")
+
+    db.execute(text("""
+        UPDATE email_verifications
+        SET verified=true
+        WHERE email=:e
+    """), {"e": row.email})
+
+    db.commit()
+
+    return {"status": "verified"}
