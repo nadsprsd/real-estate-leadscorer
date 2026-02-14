@@ -1,99 +1,94 @@
-from openai import OpenAI
 import os
 import json
-import re
+from openai import OpenAI
 
+# Create OpenAI client (NEW SDK)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def build_prompt(message: str, industry: str):
+SYSTEM_PROMPT = """
+You are a Lead Qualification AI for a business SaaS.
 
-    base = f"""
-You are an AI lead qualification engine for the {industry} industry.
+Your job:
 
-Your job is to score how urgently a salesperson must respond.
+1. Decide if the message is a REAL business inquiry.
+2. If not a lead, mark is_lead=false.
+3. If yes, detect intent.
+4. Score urgency from 0 to 100.
+5. Give short business recommendation.
 
-Scoring rules:
-- 90–100 = Immediate action (today, deadline risk, financial loss, missed deal)
-- 70–89 = High intent but not critical
-- 40–69 = Medium interest
-- 0–39 = Low quality or vague
+Valid intents examples:
+- property_buy
+- property_rent
+- logistics_shipping
+- service_inquiry
+- price_request
+- personal
+- spam
+- greeting
 
-Message:
-"{message}"
+Return ONLY valid JSON.
 
-Return ONLY valid JSON in this format:
+Format:
 
-{{
-  "urgency_score": number,
-  "sentiment": "positive" | "neutral" | "negative",
-  "entities": {{}},
-  "recommendation": "short sales advice"
-}}
+{
+  "is_lead": true/false,
+  "intent": "...",
+  "urgency_score": 0-100,
+  "confidence": 0-1,
+  "reason": "...",
+  "sentiment": "...",
+  "recommendation": "..."
+}
 """
 
-    if industry == "real_estate":
-        base += "\nSignals: budget, urgency words, timeline, readiness, location."
-    elif industry == "logistics":
-        base += "\nSignals: cargo size, deadlines, urgency words, penalties, destinations."
 
-    return base
+def analyze_lead_message(message: str, industry: str) -> dict:
+    prompt = f"""
+Industry: {industry}
 
-
-def apply_business_rules(message: str, score: int) -> int:
-    text = message.lower()
-
-    urgent_words = ["urgent", "asap", "today", "immediately", "now", "right away"]
-    deadline_words = ["tomorrow", "tonight", "miss", "delay", "late"]
-
-    if any(w in text for w in urgent_words):
-        score = max(score, 85)
-
-    if any(w in text for w in deadline_words):
-        score = max(score, 90)
-
-    # Big numbers = higher urgency
-    if re.search(r"\b\d{4,}\b", text):  # 1000+, budgets, weights
-        score = max(score, 80)
-
-    return min(score, 100)
-
-
-def analyze_lead_message(message: str, industry: str):
-
-    prompt = build_prompt(message, industry)
+Message:
+{message}
+"""
 
     try:
-
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a strict JSON generator."},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            timeout= 10 
+            temperature=0.2
         )
 
-        raw = response.choices[0].message.content.strip()
-        data = json.loads(raw)
+        text = response.choices[0].message.content.strip()
 
-        score = int(data.get("urgency_score", 50))
-        score = apply_business_rules(message, score)
+        # Safety: ensure valid JSON
+        data = json.loads(text)
 
+        # HARD GUARANTEES (important)
         return {
-            "urgency_score": score,
+            "is_lead": bool(data.get("is_lead", False)),
+            "intent": data.get("intent", "unknown"),
+            "urgency_score": int(data.get("urgency_score", 0)),
+            "confidence": float(data.get("confidence", 0.0)),
+            "reason": data.get("reason", ""),
             "sentiment": data.get("sentiment", "neutral"),
-            "entities": data.get("entities", {}),
-            "recommendation": data.get("recommendation", "")
+            "recommendation": data.get("recommendation", ""),
+            "entities": data.get("entities", {})
         }
 
     except Exception as e:
-        print("AI ERROR:", e)
+        print("AI Error:", e)
+
+        # ✅ SAFE FALLBACK (NO CRASH, NO HOT FALSE POSITIVE)
         return {
-            "urgency_score": 50,
+            "is_lead": False,
+            "intent": "unknown",
+            "urgency_score": 0,
+            "confidence": 0.0,
+            "reason": "AI failed",
             "sentiment": "neutral",
-            "entities": {},
-            "recommendation": "Manual review required"
+            "recommendation": "Manual review",
+            "entities": {}
         }
