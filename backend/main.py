@@ -1,4 +1,3 @@
-# backend/main.py
 
 import os
 import uuid
@@ -13,7 +12,7 @@ load_dotenv()
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
 
 from pydantic import BaseModel
 from jose import jwt, JWTError
@@ -23,8 +22,6 @@ from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 
 import stripe
-import requests
-
 import httpx
 from urllib.parse import urlencode
 
@@ -32,29 +29,26 @@ from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
 from backend.services.alerts import send_hot_alert
-from backend.services.email_verify import send_verify_email
-from fastapi.responses import RedirectResponse
 from backend.services.email_verify import (
     send_verify_email,
     send_password_reset_email
 )
-
-
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
+
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 
-stripe.api_key = STRIPE_SECRET_KEY
-
-logging.basicConfig(level=logging.INFO)
-
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+logging.basicConfig(level=logging.INFO)
 
 
 # --------------------------------------------------
@@ -73,7 +67,7 @@ PLANS = {
 # APP
 # --------------------------------------------------
 
-app = FastAPI(title="LeadScorer SaaS")
+app = FastAPI(title="LeadRankerAI SaaS")
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,7 +89,7 @@ class RegisterInput(BaseModel):
     email: str
     password: str
     brokerage_name: str
-    industry:str
+    industry: str
 
 
 class LoginInput(BaseModel):
@@ -112,23 +106,23 @@ class LeadInput(BaseModel):
     campaign: str | None = None
 
 
-
 class CheckoutInput(BaseModel):
     plan: str
 
 
 class ForgotPasswordInput(BaseModel):
-    email: str 
-     
+    email: str
+
 
 class ResetPasswordInput(BaseModel):
     token: str
-    password: str    
+    password: str
 
 
 # --------------------------------------------------
 # AUTH HELPERS
 # --------------------------------------------------
+
 
 def hash_password(p):
     return pwd_context.hash(p)
@@ -139,13 +133,11 @@ def verify_password(p, h):
 
 
 def create_jwt(bid: str, email: str):
-
     payload = {
         "sub": email,
         "brokerage_id": bid,
         "iat": int(time.time())
     }
-
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -153,9 +145,7 @@ def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ):
-
     try:
-
         payload = jwt.decode(
             creds.credentials,
             JWT_SECRET,
@@ -163,13 +153,16 @@ def get_current_user(
         )
 
         set_tenant(db, payload["brokerage_id"])
-
         return payload
 
     except JWTError:
         raise HTTPException(401, "Invalid token")
     
-#Google auth
+
+    
+# --------------------------------------------------
+# Google Auth/Login
+# --------------------------------------------------
 
 @app.get("/auth/google/login")
 def google_login():
@@ -195,14 +188,14 @@ def google_login():
 
 def get_billing_status(db: Session, bid: str) -> Dict:
 
-    row = db.execute(text("""
+    usage_row = db.execute(text("""
         SELECT COUNT(*)
         FROM lead_scores
         WHERE brokerage_id=:id
           AND created_at >= date_trunc('month', NOW())
     """), {"id": bid}).fetchone()
 
-    usage = row[0] if row else 0
+    usage = usage_row[0] if usage_row else 0
 
     plan_row = db.execute(
         text("SELECT plan FROM brokerages WHERE id=:id"),
@@ -215,7 +208,6 @@ def get_billing_status(db: Session, bid: str) -> Dict:
         plan = "free"
 
     limit = PLANS[plan]["limit"]
-
     percent = int((usage / limit) * 100) if limit else 0
 
     return {
@@ -227,70 +219,67 @@ def get_billing_status(db: Session, bid: str) -> Dict:
         "blocked": usage >= limit
     }
 
-
 # --------------------------------------------------
-# CORE SAVE
+# CORE SAVE (NO ALERT LOGIC HERE)
 # --------------------------------------------------
 
 def save_lead(
     db: Session,
     brokerage_id: str,
-    email: str,
+    user_email: str,
     payload: dict,
     ai: dict
 ):
-    # -----------------------------
-    # Normalize lead intent
-    # -----------------------------
+
     is_lead = ai.get("is_lead", False)
     score = int(ai.get("urgency_score", 0))
 
     if not is_lead:
-        score = 0
         bucket = "IGNORE"
+        score = 0
+    elif score >= 80:
+        bucket = "HOT"
+    elif score >= 50:
+        bucket = "WARM"
     else:
-        if score >= 80:
-            bucket = "HOT"
-        elif score >= 50:
-            bucket = "WARM"
-        else:
-            bucket = "COLD"
+        bucket = "COLD"
 
-    # -----------------------------
-    # Persist lead (even IGNORE)
-    # -----------------------------
     lead = LeadScore(
         id=str(uuid.uuid4()),
         brokerage_id=brokerage_id,
-        user_email=email,
-
-        input_payload={
-            **payload,
-            "is_lead": is_lead   # 👈 STORE HERE
-        },
-
+        user_email=user_email,
+        input_payload={**payload, "is_lead": is_lead},
         urgency_score=score if is_lead else None,
         sentiment=ai.get("sentiment"),
         ai_recommendation=ai.get("recommendation"),
-
         score=score,
         bucket=bucket,
-
         created_at=datetime.now(timezone.utc)
     )
 
     db.add(lead)
     db.commit()
 
-    # -----------------------------
-    # Alerts (HOT leads only)
-    # -----------------------------
+    # 🔥 HOT ALERT CENTRALIZED
     if bucket == "HOT":
-        msg = payload.get("message") or payload.get("text", "")
-        send_hot_alert(email, msg, score)
+
+        owner = db.execute(text("""
+            SELECT email
+            FROM users
+            WHERE brokerage_id=:bid
+            LIMIT 1
+        """), {"bid": brokerage_id}).fetchone()
+
+        if owner:
+            send_hot_alert(
+                to_email=owner.email,
+                lead_data={
+                    **payload,
+                    "score": score
+                }
+            )
 
     return lead, bucket, score
-
 
 # --------------------------------------------------
 # AUTH (Register)
@@ -537,64 +526,201 @@ def score_lead(
 
 
 
+ 
+
 # --------------------------------------------------
-# EMAIL INBOUND (SYNC SAFE)
+# EMAIL INBOUND (Resend → LeadRankerAI) FIXED
 # --------------------------------------------------
 
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+
+
+async def fetch_full_email(email_id: str):
+
+    async with httpx.AsyncClient() as client:
+
+        res = await client.get(
+            f"https://api.resend.com/emails/receiving/{email_id}",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}"
+            },
+            timeout=10
+        )
+
+        if res.status_code != 200:
+
+            logging.error(f"❌ Failed to fetch email: {res.text}")
+            return None
+
+        return res.json()
+
+
 @app.post("/inbound/email")
-async def inbound_email(
-    payload: dict,
+async def inbound_email(request: Request, db: Session = Depends(get_db)):
+
+    try:
+
+        payload = await request.json()
+
+        logging.info("📧 Inbound webhook received")
+
+        data = payload.get("data", {})
+
+        email_id = data.get("email_id")
+
+        if not email_id:
+            logging.warning("❌ Missing email_id")
+            return {"ok": True}
+
+        # Fetch full email from Resend
+        email_full = await fetch_full_email(email_id)
+
+        if not email_full:
+            return {"ok": True}
+
+        to_list = email_full.get("to", [])
+        from_email = email_full.get("from", "")
+        subject = email_full.get("subject", "")
+
+        text_msg = (
+            email_full.get("text")
+            or email_full.get("html")
+            or ""
+        )
+
+        if not text_msg:
+            logging.warning("❌ No email content found")
+            return {"ok": True}
+
+        to_email = to_list[0] if isinstance(to_list, list) else to_list
+
+        if "+" not in to_email:
+            logging.warning("❌ Invalid forwarding email")
+            return {"ok": True}
+
+        brokerage_id = to_email.split("+")[1].split("@")[0]
+
+        logging.info(f"🏢 Brokerage detected: {brokerage_id}")
+
+        # Get industry
+        row = db.execute(
+            text("SELECT industry FROM brokerages WHERE id=:i"),
+            {"i": brokerage_id}
+        ).fetchone()
+
+        if not row:
+            logging.warning("❌ Brokerage not found")
+            return {"ok": True}
+
+        industry = row.industry
+
+        full_message = f"{subject}\n\n{text_msg}"
+
+        # AI scoring
+        ai = analyze_lead_message(full_message, industry)
+
+        payload_db = {
+
+            "name": None,
+            "email": from_email,
+            "phone": None,
+
+            "message": full_message,
+
+            "source": "email",
+            "campaign": None
+        }
+
+        lead_obj, bucket, score = save_lead(
+
+            db,
+            brokerage_id,
+            from_email,
+            payload_db,
+            ai
+        )
+
+        logging.info(f"✅ Lead saved: {lead_obj.id}")
+
+        return {"status": "received"}
+
+    except Exception as e:
+
+        logging.exception("❌ Email ingest failed")
+
+        return {"ok": True}
+
+
+
+# --------------------------------------------------
+# UNIVERSAL WEBHOOK INGEST (Website / CRM / Ads)
+# --------------------------------------------------
+
+@app.post("/inbound/{brokerage_id}")
+async def inbound_webhook(
+    brokerage_id: str,
+    lead: LeadInput,
     db: Session = Depends(get_db)
 ):
 
-    logging.info("📧 Inbound email received")
+    logging.info("🌐 Webhook lead received")
 
-    data = payload.get("data", {})
-
-    to_list = data.get("to", [])
-    from_email = data.get("from", "")
-    subject = data.get("subject", "")
-    text_msg = data.get("text", "")
-
-    if not text_msg:
-        logging.warning("No email body")
-        return {"ok": True}
-
-    if not to_list:
-        return {"ok": True}
-
-    to_email = to_list[0]
-
-    if "+" not in to_email:
-        return {"ok": True}
-
-    brokerage_id = to_email.split("+")[1].split("@")[0]
-
+    # 🔎 Get industry
     row = db.execute(
         text("SELECT industry FROM brokerages WHERE id=:i"),
         {"i": brokerage_id}
     ).fetchone()
 
-    industry = row.industry if row else "real_estate"
+    if not row:
+        raise HTTPException(404, "Brokerage not found")
 
-    full_msg = f"{subject}\n\n{text_msg}"
+    industry = row.industry
 
-    ai = analyze_lead_message(full_msg, industry)
+    # AI scoring
+    ai = analyze_lead_message(lead.message, industry)
 
-    payload_db = {
-        "message": full_msg,
-        "source": "email"
+    payload = {
+        "name": lead.name,
+        "email": lead.email,
+        "phone": lead.phone,
+        "message": lead.message,
+        "source": lead.source,
+        "campaign": lead.campaign,
+        "entities": ai.get("entities", {})
     }
 
-    save_lead(
+    lead_obj, bucket, score = save_lead(
         db,
         brokerage_id,
-        from_email,
-        payload_db,
+        lead.email or "unknown",
+        payload,
         ai
     )
 
-    return {"ok": True}
+    # 🔥 Send HOT alert to brokerage owner
+    if bucket == "HOT":
+
+        owner = db.execute(text("""
+            SELECT email
+            FROM users
+            WHERE brokerage_id=:bid
+            LIMIT 1
+        """), {"bid": brokerage_id}).fetchone()
+
+        if owner:
+            send_hot_alert(
+                to_email=owner.email,
+                lead_data={
+                    **payload,
+                    "score": score
+                }
+            )
+
+    return {
+        "status": "received",
+        "bucket": bucket,
+        "score": score
+    }
 
 
 # --------------------------------------------------
