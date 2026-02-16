@@ -25,11 +25,19 @@ from sqlalchemy.orm import Session
 import stripe
 import requests
 
+import httpx
+from urllib.parse import urlencode
+
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
 from backend.services.alerts import send_hot_alert
 from backend.services.email_verify import send_verify_email
+from fastapi.responses import RedirectResponse
+from backend.services.email_verify import (
+    send_verify_email,
+    send_password_reset_email
+)
 
 
 # --------------------------------------------------
@@ -43,6 +51,10 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 stripe.api_key = STRIPE_SECRET_KEY
 
 logging.basicConfig(level=logging.INFO)
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 
 # --------------------------------------------------
@@ -92,12 +104,26 @@ class LoginInput(BaseModel):
 
 
 class LeadInput(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
     message: str
     source: str = "manual"
+    campaign: str | None = None
+
 
 
 class CheckoutInput(BaseModel):
     plan: str
+
+
+class ForgotPasswordInput(BaseModel):
+    email: str 
+     
+
+class ResetPasswordInput(BaseModel):
+    token: str
+    password: str    
 
 
 # --------------------------------------------------
@@ -142,6 +168,25 @@ def get_current_user(
 
     except JWTError:
         raise HTTPException(401, "Invalid token")
+    
+#Google auth
+
+@app.get("/auth/google/login")
+def google_login():
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account"
+    }
+
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+    return {"auth_url": url}
+
 
 
 # --------------------------------------------------
@@ -465,10 +510,14 @@ def score_lead(
     #Only REAL leads
 
     payload = {
-        "message": lead.message,
-        "source": lead.source,
-        "entities": ai.get("entities", {})
-    }
+    "name": lead.name,
+    "email": lead.email,
+    "phone": lead.phone,
+    "message": lead.message,
+    "source": lead.source,
+    "campaign": lead.campaign,
+    "entities": ai.get("entities", {})
+}
 
     lead_obj, bucket, score = save_lead(
         db,
@@ -572,19 +621,26 @@ def leads_history(
     )
 
     return {
-        "data": [
-            {
-                "id": r.id,
-                "lead": r.input_payload.get("message"),
-                "score": r.score,
-                "bucket": r.bucket,
-                "created_at": r.created_at.isoformat(),
-                "recommendation": r.ai_recommendation
-            }
-            for r in rows
-        ]
-    }
+    "data": [
+        {
+            "id": r.id,
+            "name": r.input_payload.get("name"),
+            "email": r.input_payload.get("email"),
+            "phone": r.input_payload.get("phone"),
+            "campaign": r.input_payload.get("campaign"),
+            "source": r.input_payload.get("source"),
 
+            "message": r.input_payload.get("message"),
+
+            "score": r.score,
+            "bucket": r.bucket,
+            "sentiment": r.sentiment,
+            "created_at": r.created_at.isoformat(),
+            "recommendation": r.ai_recommendation
+        }
+        for r in rows
+    ]
+}
 
 # --------------------------------------------------
 # Billing / usage
@@ -671,3 +727,196 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     db.commit()
 
     return {"status": "verified"}
+
+
+
+# --------------------------------------------------
+# Magic link
+# --------------------------------------------------
+
+
+
+@app.get("/settings/connections")
+def get_connections(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    bid = user["brokerage_id"]
+
+    email_forward = f"leads+{bid}@leadrankerai.com"
+    webhook_url = f"https://api.leadrankerai.com/inbound/{bid}"
+
+    return {
+        "email_forwarding": email_forward,
+        "webhook_url": webhook_url,
+        "status": "connected"
+    }
+
+#Google auth config
+
+@app.get("/auth/google/callback")
+async def google_callback(code: str, db: Session = Depends(get_db)):
+
+    # Exchange code for access token
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code"
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    token_data = token_res.json()
+
+    access_token = token_data.get("access_token")
+
+    if not access_token:
+        raise HTTPException(400, "Google auth failed")
+
+    # Get user info
+    async with httpx.AsyncClient() as client:
+        user_res = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+    user_data = user_res.json()
+
+    email = user_data.get("email")
+
+    if not email:
+        raise HTTPException(400, "Email not provided")
+
+    # Check if user exists
+    row = db.execute(text("""
+        SELECT brokerage_id FROM users WHERE email=:e
+    """), {"e": email}).fetchone()
+
+    if row:
+        brokerage_id = row.brokerage_id
+    else:
+        # Auto-create new brokerage + user
+        brokerage_id = str(uuid.uuid4())
+        user_id = str(uuid.uuid4())
+
+        db.execute(text("""
+            INSERT INTO brokerages (id,name,plan,industry)
+            VALUES (:i,:n,'trial','real_estate')
+        """), {"i": brokerage_id, "n": "Google User"})
+
+        db.execute(text("""
+            INSERT INTO users (id,email,hashed_password,brokerage_id)
+            VALUES (:i,:e,:p,:b)
+        """), {
+            "i": user_id,
+            "e": email,
+            "p": hash_password(str(uuid.uuid4())),
+            "b": brokerage_id
+        })
+
+        db.commit()
+
+    # Create JWT
+        jwt_token = create_jwt(brokerage_id, email)
+
+# Redirect to frontend with token
+        frontend_url = f"http://localhost:5173/oauth-success?token={jwt_token}"
+
+        return RedirectResponse(url=frontend_url)
+
+    # Redirect to frontend
+        return JSONResponse({
+        "access_token": jwt_token,
+        "email": email
+})
+
+
+#Forgot password
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(
+    data: ForgotPasswordInput,
+    db: Session = Depends(get_db)
+):
+    email = data.email
+
+    row = db.execute(
+        text("SELECT id FROM users WHERE email=:e"),
+        {"e": email}
+    ).fetchone()
+
+    if not row:
+        return {"message": "If account exists, reset link sent"}
+
+    # 🔥 Delete old tokens first
+    db.execute(text("""
+        DELETE FROM password_resets
+        WHERE email=:e
+    """), {"e": email})
+
+    token = str(uuid.uuid4())
+
+    db.execute(text("""
+        INSERT INTO password_resets (id,email,token,expires_at)
+        VALUES (:i,:e,:t,:x)
+    """), {
+        "i": str(uuid.uuid4()),
+        "e": email,
+        "t": token,
+        "x": datetime.utcnow() + timedelta(hours=1)
+    })
+
+    db.commit()
+
+    send_password_reset_email(email, token)
+
+    return {"message": "If account exists, reset link sent"}
+
+
+
+#Password Reset
+
+@app.post("/auth/reset-password")
+def reset_password(
+    data: ResetPasswordInput,
+    db: Session = Depends(get_db)
+):
+
+    # 🔎 Find valid token
+    row = db.execute(text("""
+        SELECT email
+        FROM password_resets
+        WHERE token=:t AND expires_at > NOW()
+    """), {"t": data.token}).fetchone()
+
+    if not row:
+        raise HTTPException(400, "Invalid or expired token")
+
+    # 🔐 Hash new password
+    new_hash = hash_password(data.password)
+
+    # 🔄 Update user password
+    db.execute(text("""
+        UPDATE users
+        SET hashed_password=:p
+        WHERE email=:e
+    """), {
+        "p": new_hash,
+        "e": row.email
+    })
+
+    # ❌ Delete reset token after use
+    db.execute(text("""
+        DELETE FROM password_resets
+        WHERE token=:t
+    """), {"t": data.token})
+
+    db.commit()
+
+    return {"message": "Password updated successfully"}
