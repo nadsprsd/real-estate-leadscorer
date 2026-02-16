@@ -54,11 +54,26 @@ export default function Login() {
           Login
         </button>
 
+        <button
+  onClick={async () => {
+    const res = await fetch("http://localhost:8000/auth/google/login");
+    const data = await res.json();
+    window.location.href = data.auth_url;
+  }}
+  className="bg-red-500 text-white px-4 py-2 rounded mt-3"
+>
+  Sign in with Google
+</button>
+
+
         <p className="text-sm text-center">
           New user?{" "}
           <a href="/register" className="text-blue-600 underline">
             Create account
           </a>
+          <a href="/forgot-password" className="text-blue-500">
+  Forgot Password?
+</a>
         </p>
       </form>
     </div>
