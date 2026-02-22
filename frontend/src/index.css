@@ -1,3 +1,31 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* GLOBAL THEME */
+
+:root {
+
+  --basebg: #444141;
+  --cardbg: #888585;
+  --border: #fcfcfc;
+
+  --text: #909457ef;
+  --muted: #a19d8d;
+
+  --accent: #00D4FF;
+
+}
+
+body {
+  background-color: #726f6f;
+  color: #d4ccccfd;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* Fix text rendering */
+h1, h2, h3 {
+  color: var(--text);
+}
+
+p {
+  color: var(--muted);
+}
