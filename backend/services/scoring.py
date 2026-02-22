@@ -2,11 +2,9 @@ import uuid
 import logging
 from enum import Enum
 
-from backend.models.lead import LeadHistory
+from backend.models import LeadScore
 from backend.services.ai_engine import (
-    analyze_lead_message,
-    apply_business_rules,
-    build_prompt
+    analyze_lead_message
 )
 
 

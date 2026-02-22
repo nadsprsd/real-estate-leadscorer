@@ -58,3 +58,5 @@ class LeadScore(Base):
     bucket = Column(String, nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    

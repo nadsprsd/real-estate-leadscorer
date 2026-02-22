@@ -6,13 +6,16 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict
 
+
 from dotenv import load_dotenv
-load_dotenv()
+
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from backend.routes.billing import router as billing_router
+
 
 from pydantic import BaseModel
 from jose import jwt, JWTError
@@ -25,6 +28,9 @@ import stripe
 import httpx
 from urllib.parse import urlencode
 
+from backend.routes.auth import router as auth_router
+from backend.routes.leads import router as leads_router
+from backend.routes.billing import router as billing_router
 from backend.db import get_db, set_tenant
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
@@ -37,6 +43,8 @@ from backend.services.email_verify import (
 # CONFIG
 # --------------------------------------------------
 
+
+load_dotenv()
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
@@ -51,16 +59,8 @@ stripe.api_key = STRIPE_SECRET_KEY
 logging.basicConfig(level=logging.INFO)
 
 
-# --------------------------------------------------
-# PLANS
-# --------------------------------------------------
 
-PLANS = {
-    "free": {"limit": 50, "price_id": None},
-    "trial": {"limit": 50, "price_id": None},
-    "starter": {"limit": 1000, "price_id": "price_1Sqs5ASGlXmZfnDz7DOrMOvc"},
-    "team": {"limit": 5000, "price_id": "price_1Sqs5zSGlXmZfnDziHFpJ1dz"},
-}
+
 
 
 # --------------------------------------------------
@@ -68,10 +68,13 @@ PLANS = {
 # --------------------------------------------------
 
 app = FastAPI(title="LeadRankerAI SaaS")
+app.include_router(auth_router)
+app.include_router(leads_router)
+app.include_router(billing_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,6 +120,10 @@ class ForgotPasswordInput(BaseModel):
 class ResetPasswordInput(BaseModel):
     token: str
     password: str
+
+
+class InviteInput(BaseModel):
+    email: str    
 
 
 # --------------------------------------------------
@@ -182,42 +189,7 @@ def google_login():
 
 
 
-# --------------------------------------------------
-# BILLING
-# --------------------------------------------------
 
-def get_billing_status(db: Session, bid: str) -> Dict:
-
-    usage_row = db.execute(text("""
-        SELECT COUNT(*)
-        FROM lead_scores
-        WHERE brokerage_id=:id
-          AND created_at >= date_trunc('month', NOW())
-    """), {"id": bid}).fetchone()
-
-    usage = usage_row[0] if usage_row else 0
-
-    plan_row = db.execute(
-        text("SELECT plan FROM brokerages WHERE id=:id"),
-        {"id": bid}
-    ).fetchone()
-
-    plan = (plan_row.plan or "free").lower()
-
-    if plan not in PLANS:
-        plan = "free"
-
-    limit = PLANS[plan]["limit"]
-    percent = int((usage / limit) * 100) if limit else 0
-
-    return {
-        "plan": plan,
-        "usage": usage,
-        "limit": limit,
-        "remaining": max(limit - usage, 0),
-        "percent": percent,
-        "blocked": usage >= limit
-    }
 
 # --------------------------------------------------
 # CORE SAVE (NO ALERT LOGIC HERE)
@@ -370,95 +342,35 @@ def login(data: LoginInput, db: Session = Depends(get_db)):
     }
 
 
+# Add this function to main.py — it's missing and causing billing status error
+def get_billing_status(db: Session, brokerage_id: str) -> dict:
+    PLAN_LIMITS = {"trial": 50, "starter": 1000, "team": 5000}
+    
+    usage = db.execute(text("""
+        SELECT COUNT(*) FROM lead_scores
+        WHERE brokerage_id = :id
+          AND created_at >= date_trunc('month', NOW())
+    """), {"id": brokerage_id}).scalar() or 0
 
-# --------------------------------------------------
-# STRIPE
-# --------------------------------------------------
+    row = db.execute(
+        text("SELECT plan FROM brokerages WHERE id = :id"),
+        {"id": brokerage_id}
+    ).fetchone()
 
-@app.post("/billing/checkout")
-def checkout(
-    data: CheckoutInput,
-    user=Depends(get_current_user)
-):
+    plan = (row[0] or "trial").lower() if row else "trial"
+    limit = PLAN_LIMITS.get(plan, 50)
 
-    plan = data.plan
-
-    if plan not in PLANS:
-        raise HTTPException(400, "Invalid plan")
-
-    price_id = PLANS[plan]["price_id"]
-
-    if not price_id:
-        raise HTTPException(400, "Not payable")
-
-    session = stripe.checkout.Session.create(
-        mode="subscription",
-
-        line_items=[{
-            "price": price_id,
-            "quantity": 1
-        }],
-
-        success_url="http://localhost:5173/dashboard?paid=1",
-        cancel_url="http://localhost:5173/billing?cancel=1",
-
-        customer_email=user["sub"],
-
-        metadata={
-            "brokerage_id": user["brokerage_id"],
-            "plan": plan
-        }
-    )
-
-    return {"checkout_url": session.url}
+    return {
+        "plan": plan,
+        "usage": usage,
+        "limit": limit,
+        "remaining": max(0, limit - usage),
+        "percent": int((usage / limit) * 100) if limit > 0 else 0,
+        "blocked": usage >= limit
+    }
 
 
 
-# --------------------------------------------------
-# Billing /Webhook
-# --------------------------------------------------
-
-
-@app.post("/billing/webhook")
-async def stripe_webhook(
-    request: Request,
-    stripe_signature: str = Header(None),
-    db: Session = Depends(get_db)
-):
-
-    payload = await request.body()
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload,
-            stripe_signature,
-            STRIPE_WEBHOOK_SECRET
-        )
-    except Exception:
-        raise HTTPException(400, "Webhook error")
-
-    data = event["data"]["object"]
-
-    if event["type"] == "checkout.session.completed":
-
-        meta = data.get("metadata", {})
-
-        bid = meta.get("brokerage_id")
-        plan = meta.get("plan")
-
-        if bid:
-            db.execute(text("""
-                UPDATE brokerages
-                SET plan=:p, subscription_status='active'
-                WHERE id=:i
-            """), {
-                "p": plan,
-                "i": bid
-            })
-
-            db.commit()
-
-    return {"status": "ok"}
 
 
 # --------------------------------------------------
@@ -652,6 +564,41 @@ async def inbound_email(request: Request, db: Session = Depends(get_db)):
 
 
 
+
+
+#Invite partner 
+
+@app.post("/api/v1/invite-partner")
+async def invite_partner(data: InviteInput, user=Depends(get_current_user)):
+    # 1. Get the brokerage ID from the authenticated user
+    bid = user.get("brokerage_id") 
+    webhook_url = f"https://api.leadrankerai.com/inbound/{bid}"
+    docs_url = "https://api.leadrankerai.com/docs"
+
+    try:
+        # 2. Actual Resend API Call
+        params = {
+            "from": "LeadRanker <onboarding@leadrankerai.com>",
+            "to": [data.email],
+            "subject": "Invitation to Connect: LeadRanker Tech Partnership",
+            "html": f"""
+                <h3>Hello Developer,</h3>
+                <p>You have been invited to connect a lead source to <strong>LeadRanker</strong>.</p>
+                <p><strong>Webhook URL:</strong> {webhook_url}</p>
+                <p><strong>API Documentation:</strong> <a href="{docs_url}">{docs_url}</a></p>
+                <p>Method: POST | Content-Type: application/json</p>
+            """
+        }
+        
+        # 3. Dispatches the email
+        resend.Emails.send(params)
+        
+        return {"status": "success", "message": "Email dispatched via Resend"}
+    
+    except Exception as e:
+        print(f"Resend Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to dispatch email via Resend")
+
 # --------------------------------------------------
 # UNIVERSAL WEBHOOK INGEST (Website / CRM / Ads)
 # --------------------------------------------------
@@ -768,16 +715,26 @@ def leads_history(
     ]
 }
 
-# --------------------------------------------------
-# Billing / usage
-# --------------------------------------------------
 
-@app.get("/billing/usage")
-def billing_usage(
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    return get_billing_status(db, user["brokerage_id"])
+# Limit request size (prevents huge webhook bodies)
+
+
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    # Skip ALL processing for webhook — let it pass through untouched
+    # Stripe signature verification needs raw headers and body intact
+    if "/billing/webhook" in request.url.path:
+        return await call_next(request)
+    
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 1000000:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    
+    return await call_next(request)
+
+
 
 
 # --------------------------------------------------
@@ -898,7 +855,6 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         )
 
     token_data = token_res.json()
-
     access_token = token_data.get("access_token")
 
     if not access_token:
@@ -912,7 +868,6 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         )
 
     user_data = user_res.json()
-
     email = user_data.get("email")
 
     if not email:
@@ -926,7 +881,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
     if row:
         brokerage_id = row.brokerage_id
     else:
-        # Auto-create new brokerage + user
+        # Create new brokerage + user
         brokerage_id = str(uuid.uuid4())
         user_id = str(uuid.uuid4())
 
@@ -947,19 +902,14 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
         db.commit()
 
-    # Create JWT
-        jwt_token = create_jwt(brokerage_id, email)
+    # ✅ CREATE JWT FOR BOTH CASES
+    jwt_token = create_jwt(brokerage_id, email)
 
-# Redirect to frontend with token
-        frontend_url = f"http://localhost:5173/oauth-success?token={jwt_token}"
+    # ✅ ALWAYS REDIRECT
+    frontend_url = f"http://localhost:5173/oauth-success?token={jwt_token}"
 
-        return RedirectResponse(url=frontend_url)
+    return RedirectResponse(url=frontend_url)
 
-    # Redirect to frontend
-        return JSONResponse({
-        "access_token": jwt_token,
-        "email": email
-})
 
 
 #Forgot password
@@ -1046,3 +996,17 @@ def reset_password(
     db.commit()
 
     return {"message": "Password updated successfully"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+
+@app.post("/api/leads/test")
+async def test_lead(user_id: str):
+    # This manually inserts a "dummy" lead into your database for that user
+    # In your React app, you can poll a different endpoint to check if this exists
+    return {"status": "success", "message": "Test lead received!"}
+

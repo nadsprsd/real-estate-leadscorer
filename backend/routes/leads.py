@@ -1,48 +1,33 @@
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-
 from backend.db import get_db
-from backend.auth import get_current_user
-from backend.services.scoring import (
-    LeadScoringService,
-    ScoringMode
-)
+from backend.models import LeadScore
+from backend.routes.auth import get_current_user
+
+router = APIRouter(prefix="/api/v1/leads", tags=["leads"])
 
 
-router = APIRouter(prefix="/leads", tags=["Leads"])
-
-
-# ---------------- SCHEMA ----------------
-
-class LeadRequest(BaseModel):
-    message: str
-    mode: ScoringMode = ScoringMode.PRODUCTION
-
-
-# ---------------- ROUTE ----------------
-
-@router.post("/score")
-async def score_lead(
-    payload: LeadRequest,
+@router.get("/history")
+def get_leads_history(
     db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user)
 ):
+    brokerage_id = user["brokerage_id"]
 
-    if not payload.message.strip():
-        raise HTTPException(400, "Empty message")
-
-    service = LeadScoringService(db)
-
-    result = await service.process_lead(
-
-        user_id=user["user_id"],
-        brokerage_id=user["brokerage_id"],
-
-        message=payload.message,
-
-        mode=payload.mode
+    leads = (
+        db.query(LeadScore)
+        .filter(LeadScore.brokerage_id == brokerage_id)
+        .order_by(LeadScore.created_at.desc())
+        .limit(50)
+        .all()
     )
 
-    return result
+    return [
+        {
+            "id": lead.id,
+            "score": lead.score,
+            "status": lead.bucket,
+            "created_at": lead.created_at
+        }
+        for lead in leads
+    ]
