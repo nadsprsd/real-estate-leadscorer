@@ -1,65 +1,52 @@
 import { create } from "zustand"
 import axios from "axios"
 
-interface AuthState {
-  token: string | null
-  user: any | null
+const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
 
-  setToken: (token: string) => void
-  fetchUser: () => Promise<void>
-  logout: () => void
+interface AuthState {
+  token:      string | null
+  user:       any | null
+  setToken:   (token: string) => void
+  fetchUser:  () => Promise<void>
+  logout:     () => void
+  clearToken: () => void
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
 
   token: localStorage.getItem("token"),
-  user: null,
+  user:  null,
 
-  setToken: (token) => {
+  setToken: (token: string) => {
     localStorage.setItem("token", token)
     set({ token })
   },
 
   fetchUser: async () => {
+    const token = localStorage.getItem("token")
+    if (!token) return
     try {
-
-      const token = localStorage.getItem("token")
-
-      if (!token) return
-
-      const res = await axios.get(
-        "http://127.0.0.1:8000/api/v1/auth/me",
-        {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        }
-      )
-
-      set({ user: res.data })
-
-    } catch (err) {
-
-      console.log("Not logged in")
-
-      localStorage.removeItem("token")
-
-      set({
-        token: null,
-        user: null
+      const res = await axios.get(`${API}/api/v1/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` }
       })
+      set({ user: res.data })
+    } catch {
+      localStorage.removeItem("token")
+      set({ token: null, user: null })
     }
   },
 
   logout: () => {
-
     localStorage.removeItem("token")
+    sessionStorage.clear()
+    set({ token: null, user: null })
+  },
 
-    set({
-      token: null,
-      user: null
-    })
-
-  }
+  // Same as logout — exists so any component can call clearToken()
+  clearToken: () => {
+    localStorage.removeItem("token")
+    sessionStorage.clear()
+    set({ token: null, user: null })
+  },
 
 }))

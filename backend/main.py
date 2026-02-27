@@ -1,214 +1,194 @@
-
 import os
 import uuid
-import time
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Dict
-
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-
-from fastapi import FastAPI, Depends, HTTPException, Request, Header
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from backend.routes.billing import router as billing_router
-
 
 from pydantic import BaseModel
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-
 from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 
 import stripe
 import httpx
-from urllib.parse import urlencode
 
-from backend.routes.auth import router as auth_router
-from backend.routes.leads import router as leads_router
+from backend.routes.auth    import router as auth_router, get_current_user
+from backend.routes.leads   import router as leads_router
 from backend.routes.billing import router as billing_router
-from backend.db import get_db, set_tenant
+from backend.routes.pixel_route   import router as pixel_router
+
+from backend.db import get_db
 from backend.models import LeadScore
 from backend.services.ai_engine import analyze_lead_message
-from backend.services.alerts import send_hot_alert
-from backend.services.email_verify import (
-    send_verify_email,
-    send_password_reset_email
-)
-# --------------------------------------------------
-# CONFIG
-# --------------------------------------------------
-
+from backend.services.alerts    import send_hot_alert
 
 load_dotenv()
 
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
-
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
-
-stripe.api_key = STRIPE_SECRET_KEY
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────
+# OPENAPI / SWAGGER
+# ─────────────────────────────────────────────
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title="LeadRankerAI SaaS",
+        version="1.0.0",
+        description="## Authentication\n\n"
+                    "1. Call **POST /api/v1/auth/login** with your email & password\n"
+                    "2. Copy the `access_token` from the response\n"
+                    "3. Click **Authorize** (top right) → paste `Bearer <your_token>`",
+        routes=app.routes,
+    )
+    schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Paste your JWT token here. Get it from POST /api/v1/auth/login"
+        }
+    }
+    public = {"/api/v1/auth/login", "/api/v1/auth/register",
+              "/api/v1/auth/verify", "/api/v1/auth/forgot-password",
+              "/api/v1/auth/reset-password", "/api/v1/auth/google/login",
+              "/api/v1/auth/google/callback", "/health",
+              "/auth/google/callback", "/auth/google/login",
+              "/auth/register", "/auth/login", "/auth/verify",
+              "/api/v1/ingest/pixel", "/api/v1/ingest/portal-data"}
+    for path, methods in schema.get("paths", {}).items():
+        if path not in public:
+            for method in methods.values():
+                method.setdefault("security", [{"BearerAuth": []}])
+    app.openapi_schema = schema
+    return schema
 
+app = FastAPI(
+    title="LeadRankerAI SaaS",
+    description="AI-powered lead scoring for real estate brokerages",
+    version="1.0.0",
+)
+app.openapi = custom_openapi
 
-
-
-
-# --------------------------------------------------
-# APP
-# --------------------------------------------------
-
-app = FastAPI(title="LeadRankerAI SaaS")
+# ─────────────────────────────────────────────
+# ROUTERS
+# ─────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(leads_router)
 app.include_router(billing_router)
+app.include_router(pixel_router)
+
+# ─────────────────────────────────────────────
+# CORS
+# allow_credentials must be False when allow_origins=["*"]
+# JWT travels in Authorization header so this is safe
+# ─────────────────────────────────────────────
+IS_DEV = os.getenv("ENV", "development") != "production"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"] if IS_DEV else [
+        "https://app.leadrankerai.com",
+        "https://leadrankerai.com",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-security = HTTPBearer()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-# --------------------------------------------------
-# SCHEMAS
-# --------------------------------------------------
-
-class RegisterInput(BaseModel):
-    email: str
-    password: str
-    brokerage_name: str
-    industry: str
-
-
-class LoginInput(BaseModel):
-    email: str
-    password: str
-
-
-class LeadInput(BaseModel):
-    name: str | None = None
-    email: str | None = None
-    phone: str | None = None
-    message: str
-    source: str = "manual"
-    campaign: str | None = None
-
-
-class CheckoutInput(BaseModel):
-    plan: str
-
-
-class ForgotPasswordInput(BaseModel):
-    email: str
-
-
-class ResetPasswordInput(BaseModel):
-    token: str
-    password: str
-
-
-class InviteInput(BaseModel):
-    email: str    
-
-
-# --------------------------------------------------
-# AUTH HELPERS
-# --------------------------------------------------
-
-
-def hash_password(p):
-    return pwd_context.hash(p)
-
-
-def verify_password(p, h):
-    return pwd_context.verify(p, h)
-
-
-def create_jwt(bid: str, email: str):
-    payload = {
-        "sub": email,
-        "brokerage_id": bid,
-        "iat": int(time.time())
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-
-def get_current_user(
-    creds: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-):
-    try:
-        payload = jwt.decode(
-            creds.credentials,
-            JWT_SECRET,
-            algorithms=["HS256"]
-        )
-
-        set_tenant(db, payload["brokerage_id"])
-        return payload
-
-    except JWTError:
-        raise HTTPException(401, "Invalid token")
-    
-
-    
-# --------------------------------------------------
-# Google Auth/Login
-# --------------------------------------------------
+# ─────────────────────────────────────────────
+# BACKWARD-COMPAT REDIRECTS (Google OAuth old paths)
+# ─────────────────────────────────────────────
+@app.get("/auth/google/callback")
+async def _google_callback_compat(request: Request):
+    qs  = request.url.query
+    url = f"/api/v1/auth/google/callback?{qs}" if qs else "/api/v1/auth/google/callback"
+    return RedirectResponse(url=url, status_code=307)
 
 @app.get("/auth/google/login")
-def google_login():
+async def _google_login_compat():
+    return RedirectResponse(url="/api/v1/auth/google/login", status_code=307)
 
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "access_type": "offline",
-        "prompt": "select_account"
+@app.get("/auth/verify")
+async def _verify_compat(request: Request):
+    qs  = request.url.query
+    url = f"/api/v1/auth/verify?{qs}" if qs else "/api/v1/auth/verify"
+    return RedirectResponse(url=url, status_code=307)
+
+@app.post("/auth/register")
+async def _register_compat():
+    return RedirectResponse(url="/api/v1/auth/register", status_code=307)
+
+@app.post("/auth/login")
+async def _login_compat():
+    return RedirectResponse(url="/api/v1/auth/login", status_code=307)
+
+
+# ─────────────────────────────────────────────
+# SCHEMAS
+# ─────────────────────────────────────────────
+class LeadInput(BaseModel):
+    name:     str | None = None
+    email:    str | None = None
+    phone:    str | None = None
+    message:  str
+    source:   str = "manual"
+    campaign: str | None = None
+
+class InviteInput(BaseModel):
+    email: str
+
+
+# ─────────────────────────────────────────────
+# BILLING HELPER  (used by multiple routes)
+# ─────────────────────────────────────────────
+def get_billing_status(db: Session, brokerage_id: str) -> dict:
+    PLAN_LIMITS = {"trial": 50, "starter": 1000, "team": 5000}
+
+    usage = db.execute(text("""
+        SELECT COUNT(*) FROM lead_scores
+        WHERE brokerage_id = :id
+          AND created_at >= date_trunc('month', NOW())
+    """), {"id": brokerage_id}).scalar() or 0
+
+    row   = db.execute(
+        text("SELECT plan FROM brokerages WHERE id = :id"),
+        {"id": brokerage_id}
+    ).fetchone()
+
+    plan  = (row[0] or "trial").lower() if row else "trial"
+    limit = PLAN_LIMITS.get(plan, 50)
+
+    return {
+        "plan":      plan,
+        "usage":     usage,
+        "limit":     limit,
+        "remaining": max(0, limit - usage),
+        "percent":   int((usage / limit) * 100) if limit > 0 else 0,
+        "blocked":   usage >= limit,
     }
 
-    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
 
-    return {"auth_url": url}
-
-
-
-
-
-# --------------------------------------------------
-# CORE SAVE (NO ALERT LOGIC HERE)
-# --------------------------------------------------
-
-def save_lead(
-    db: Session,
-    brokerage_id: str,
-    user_email: str,
-    payload: dict,
-    ai: dict
-):
-
+# ─────────────────────────────────────────────
+# CORE LEAD SAVE  (shared by score + inbound + pixel)
+# ─────────────────────────────────────────────
+def save_lead(db, brokerage_id, user_email, payload, ai):
     is_lead = ai.get("is_lead", False)
-    score = int(ai.get("urgency_score", 0))
+    score   = int(ai.get("urgency_score", 0))
 
     if not is_lead:
-        bucket = "IGNORE"
-        score = 0
+        bucket, score = "IGNORE", 0
     elif score >= 80:
         bucket = "HOT"
     elif score >= 50:
@@ -228,785 +208,297 @@ def save_lead(
         bucket=bucket,
         created_at=datetime.now(timezone.utc)
     )
-
     db.add(lead)
     db.commit()
 
-    # 🔥 HOT ALERT CENTRALIZED
     if bucket == "HOT":
-
-        owner = db.execute(text("""
-            SELECT email
-            FROM users
-            WHERE brokerage_id=:bid
-            LIMIT 1
-        """), {"bid": brokerage_id}).fetchone()
-
+        owner = db.execute(text(
+            "SELECT email FROM users WHERE brokerage_id = :bid LIMIT 1"
+        ), {"bid": brokerage_id}).fetchone()
         if owner:
-            send_hot_alert(
-                to_email=owner.email,
-                lead_data={
-                    **payload,
-                    "score": score
-                }
-            )
+            send_hot_alert(to_email=owner.email, lead_data={**payload, "score": score})
 
     return lead, bucket, score
 
-# --------------------------------------------------
-# AUTH (Register)
-# --------------------------------------------------
 
-@app.post("/auth/register")
-def register(data: RegisterInput, db: Session = Depends(get_db)):
-
-    exists = db.execute(
-        text("SELECT id FROM users WHERE email=:e"),
-        {"e": data.email}
-    ).fetchone()
-
-    if exists:
-        raise HTTPException(400, "Email already exists")
-
-    bid = str(uuid.uuid4())
-    uid = str(uuid.uuid4())
-
-    db.execute(text("""
-        INSERT INTO brokerages (id, name, plan, industry)
-        VALUES (:i, :n, 'trial', :ind)
-    """), {
-        "i": bid,
-        "n": data.brokerage_name,
-        "ind": data.industry
-    })
-
-    db.execute(text("""
-        INSERT INTO users (id, email, hashed_password, brokerage_id)
-        VALUES (:i, :e, :p, :b)
-    """), {
-        "i": uid,
-        "e": data.email,
-        "p": hash_password(data.password),
-        "b": bid
-    })
-
-    # ✅ Send email + get token
-    token = send_verify_email(data.email)
-
-    db.execute(text("""
-        INSERT INTO email_verifications
-        (id, email, token, expires_at, verified)
-        VALUES (:i, :e, :t, :x, false)
-    """), {
-        "i": str(uuid.uuid4()),
-        "e": data.email,
-        "t": token,
-        "x": datetime.utcnow() + timedelta(hours=24)
-    })
-
-    db.commit()
-
-    return {
-        "status": "verification_sent",
-        "message": "Check your email to verify your account"
-    }
-
-
-
-# --------------------------------------------------
-# Login
-# --------------------------------------------------
-
-
-@app.post("/auth/login")
-def login(data: LoginInput, db: Session = Depends(get_db)):
-
-    user = db.execute(text("""
-        SELECT u.hashed_password, u.brokerage_id, ev.verified
-        FROM users u
-        LEFT JOIN email_verifications ev ON ev.email = u.email
-        WHERE u.email=:e
-    """), {"e": data.email}).fetchone()
-
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(401, "Invalid credentials")
-
-    if not user.verified:
-        raise HTTPException(403, "Please verify your email first")
-
-    return {
-        "access_token": create_jwt(
-            str(user.brokerage_id),
-            data.email
-        )
-    }
-
-
-# Add this function to main.py — it's missing and causing billing status error
-def get_billing_status(db: Session, brokerage_id: str) -> dict:
-    PLAN_LIMITS = {"trial": 50, "starter": 1000, "team": 5000}
-    
-    usage = db.execute(text("""
-        SELECT COUNT(*) FROM lead_scores
-        WHERE brokerage_id = :id
-          AND created_at >= date_trunc('month', NOW())
-    """), {"id": brokerage_id}).scalar() or 0
-
-    row = db.execute(
-        text("SELECT plan FROM brokerages WHERE id = :id"),
-        {"id": brokerage_id}
-    ).fetchone()
-
-    plan = (row[0] or "trial").lower() if row else "trial"
-    limit = PLAN_LIMITS.get(plan, 50)
-
-    return {
-        "plan": plan,
-        "usage": usage,
-        "limit": limit,
-        "remaining": max(0, limit - usage),
-        "percent": int((usage / limit) * 100) if limit > 0 else 0,
-        "blocked": usage >= limit
-    }
-
-
-
-
-
-# --------------------------------------------------
-# SCORE
-# --------------------------------------------------
-
+# ─────────────────────────────────────────────
+# POST /leads/score
+# ─────────────────────────────────────────────
 @app.post("/leads/score")
 def score_lead(
     lead: LeadInput,
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-
     billing = get_billing_status(db, user["brokerage_id"])
     if billing["blocked"]:
-        raise HTTPException(402, "Quota exceeded")
+        raise HTTPException(402, "Monthly quota exceeded. Please upgrade your plan.")
 
     row = db.execute(
-        text("SELECT industry FROM brokerages WHERE id=:i"),
+        text("SELECT industry FROM brokerages WHERE id = :i"),
         {"i": user["brokerage_id"]}
     ).fetchone()
-
     industry = row.industry if row else "real_estate"
 
     ai = analyze_lead_message(lead.message, industry)
 
-    #  ANTI-MISLEADING LOGIC 
-
     if not ai.get("is_lead", False):
         return {
-            "score": 0,
-            "bucket": "IGNORE",
-            "sentiment": ai.get("sentiment", "neutral"),
+            "score":          0,
+            "bucket":         "IGNORE",
+            "sentiment":      ai.get("sentiment", "neutral"),
             "recommendation": ai.get("recommendation", ""),
-            "billing": get_billing_status(db, user["brokerage_id"])
+            "billing":        get_billing_status(db, user["brokerage_id"])
         }
 
-    #Only REAL leads
-
     payload = {
-    "name": lead.name,
-    "email": lead.email,
-    "phone": lead.phone,
-    "message": lead.message,
-    "source": lead.source,
-    "campaign": lead.campaign,
-    "entities": ai.get("entities", {})
-}
+        "name": lead.name, "email": lead.email, "phone": lead.phone,
+        "message": lead.message, "source": lead.source,
+        "campaign": lead.campaign, "entities": ai.get("entities", {})
+    }
 
     lead_obj, bucket, score = save_lead(
-        db,
-        user["brokerage_id"],
-        user["sub"],
-        payload,
-        ai
+        db, user["brokerage_id"], user["sub"], payload, ai
     )
 
     return {
-        "score": score,
-        "bucket": bucket,
-        "sentiment": ai["sentiment"],
+        "score":          score,
+        "bucket":         bucket,
+        "sentiment":      ai["sentiment"],
         "recommendation": ai["recommendation"],
-        "billing": get_billing_status(db, user["brokerage_id"])
+        "billing":        get_billing_status(db, user["brokerage_id"])
     }
 
 
-
- 
-
-# --------------------------------------------------
-# EMAIL INBOUND (Resend → LeadRankerAI) FIXED
-# --------------------------------------------------
-
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-
-
+# ─────────────────────────────────────────────
+# POST /inbound/email
+# ─────────────────────────────────────────────
 async def fetch_full_email(email_id: str):
-
     async with httpx.AsyncClient() as client:
-
         res = await client.get(
             f"https://api.resend.com/emails/receiving/{email_id}",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}"
-            },
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
             timeout=10
         )
-
         if res.status_code != 200:
-
-            logging.error(f"❌ Failed to fetch email: {res.text}")
+            logger.error(f"Failed to fetch email: {res.text}")
             return None
-
         return res.json()
 
 
 @app.post("/inbound/email")
 async def inbound_email(request: Request, db: Session = Depends(get_db)):
-
     try:
-
-        payload = await request.json()
-
-        logging.info("📧 Inbound webhook received")
-
-        data = payload.get("data", {})
-
-        email_id = data.get("email_id")
-
+        payload   = await request.json()
+        data      = payload.get("data", {})
+        email_id  = data.get("email_id")
         if not email_id:
-            logging.warning("❌ Missing email_id")
             return {"ok": True}
 
-        # Fetch full email from Resend
         email_full = await fetch_full_email(email_id)
-
         if not email_full:
             return {"ok": True}
 
-        to_list = email_full.get("to", [])
+        to_list    = email_full.get("to", [])
         from_email = email_full.get("from", "")
-        subject = email_full.get("subject", "")
-
-        text_msg = (
-            email_full.get("text")
-            or email_full.get("html")
-            or ""
-        )
+        subject    = email_full.get("subject", "")
+        text_msg   = email_full.get("text") or email_full.get("html") or ""
 
         if not text_msg:
-            logging.warning("❌ No email content found")
             return {"ok": True}
 
         to_email = to_list[0] if isinstance(to_list, list) else to_list
-
         if "+" not in to_email:
-            logging.warning("❌ Invalid forwarding email")
             return {"ok": True}
 
         brokerage_id = to_email.split("+")[1].split("@")[0]
 
-        logging.info(f"🏢 Brokerage detected: {brokerage_id}")
-
-        # Get industry
         row = db.execute(
-            text("SELECT industry FROM brokerages WHERE id=:i"),
+            text("SELECT industry FROM brokerages WHERE id = :i"),
             {"i": brokerage_id}
         ).fetchone()
-
         if not row:
-            logging.warning("❌ Brokerage not found")
             return {"ok": True}
 
-        industry = row.industry
-
-        full_message = f"{subject}\n\n{text_msg}"
-
-        # AI scoring
-        ai = analyze_lead_message(full_message, industry)
-
-        payload_db = {
-
-            "name": None,
-            "email": from_email,
-            "phone": None,
-
-            "message": full_message,
-
-            "source": "email",
-            "campaign": None
-        }
-
-        lead_obj, bucket, score = save_lead(
-
-            db,
-            brokerage_id,
-            from_email,
-            payload_db,
-            ai
-        )
-
-        logging.info(f"✅ Lead saved: {lead_obj.id}")
+        ai = analyze_lead_message(f"{subject}\n\n{text_msg}", row.industry)
+        save_lead(db, brokerage_id, from_email, {
+            "name": None, "email": from_email, "phone": None,
+            "message": f"{subject}\n\n{text_msg}", "source": "email", "campaign": None
+        }, ai)
 
         return {"status": "received"}
-
-    except Exception as e:
-
-        logging.exception("❌ Email ingest failed")
-
+    except Exception:
+        logger.exception("Email ingest failed")
         return {"ok": True}
 
 
-
-
-
-#Invite partner 
-
-@app.post("/api/v1/invite-partner")
-async def invite_partner(data: InviteInput, user=Depends(get_current_user)):
-    # 1. Get the brokerage ID from the authenticated user
-    bid = user.get("brokerage_id") 
-    webhook_url = f"https://api.leadrankerai.com/inbound/{bid}"
-    docs_url = "https://api.leadrankerai.com/docs"
-
-    try:
-        # 2. Actual Resend API Call
-        params = {
-            "from": "LeadRanker <onboarding@leadrankerai.com>",
-            "to": [data.email],
-            "subject": "Invitation to Connect: LeadRanker Tech Partnership",
-            "html": f"""
-                <h3>Hello Developer,</h3>
-                <p>You have been invited to connect a lead source to <strong>LeadRanker</strong>.</p>
-                <p><strong>Webhook URL:</strong> {webhook_url}</p>
-                <p><strong>API Documentation:</strong> <a href="{docs_url}">{docs_url}</a></p>
-                <p>Method: POST | Content-Type: application/json</p>
-            """
-        }
-        
-        # 3. Dispatches the email
-        resend.Emails.send(params)
-        
-        return {"status": "success", "message": "Email dispatched via Resend"}
-    
-    except Exception as e:
-        print(f"Resend Error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to dispatch email via Resend")
-
-# --------------------------------------------------
-# UNIVERSAL WEBHOOK INGEST (Website / CRM / Ads)
-# --------------------------------------------------
-
+# ─────────────────────────────────────────────
+# POST /inbound/{brokerage_id}
+# ─────────────────────────────────────────────
 @app.post("/inbound/{brokerage_id}")
 async def inbound_webhook(
     brokerage_id: str,
     lead: LeadInput,
     db: Session = Depends(get_db)
 ):
-
-    logging.info("🌐 Webhook lead received")
-
-    # 🔎 Get industry
     row = db.execute(
-        text("SELECT industry FROM brokerages WHERE id=:i"),
+        text("SELECT industry FROM brokerages WHERE id = :i"),
         {"i": brokerage_id}
     ).fetchone()
-
     if not row:
         raise HTTPException(404, "Brokerage not found")
 
-    industry = row.industry
-
-    # AI scoring
-    ai = analyze_lead_message(lead.message, industry)
-
+    ai      = analyze_lead_message(lead.message, row.industry)
     payload = {
-        "name": lead.name,
-        "email": lead.email,
-        "phone": lead.phone,
-        "message": lead.message,
-        "source": lead.source,
-        "campaign": lead.campaign,
-        "entities": ai.get("entities", {})
+        "name": lead.name, "email": lead.email, "phone": lead.phone,
+        "message": lead.message, "source": lead.source,
+        "campaign": lead.campaign, "entities": ai.get("entities", {})
     }
-
-    lead_obj, bucket, score = save_lead(
-        db,
-        brokerage_id,
-        lead.email or "unknown",
-        payload,
-        ai
+    _, bucket, score = save_lead(
+        db, brokerage_id, lead.email or "unknown", payload, ai
     )
-
-    # 🔥 Send HOT alert to brokerage owner
-    if bucket == "HOT":
-
-        owner = db.execute(text("""
-            SELECT email
-            FROM users
-            WHERE brokerage_id=:bid
-            LIMIT 1
-        """), {"bid": brokerage_id}).fetchone()
-
-        if owner:
-            send_hot_alert(
-                to_email=owner.email,
-                lead_data={
-                    **payload,
-                    "score": score
-                }
-            )
-
-    return {
-        "status": "received",
-        "bucket": bucket,
-        "score": score
-    }
+    return {"status": "received", "bucket": bucket, "score": score}
 
 
-# --------------------------------------------------
-# HISTORY / DASHBOARD
-# --------------------------------------------------
-
+# ─────────────────────────────────────────────
+# GET /leads/history
+# ─────────────────────────────────────────────
 @app.get("/leads/history")
 def leads_history(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = 50, offset: int = 0,
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-
-    bid = user["brokerage_id"]
-
     rows = (
         db.query(LeadScore)
-        .filter(LeadScore.brokerage_id == bid)
+        .filter(LeadScore.brokerage_id == user["brokerage_id"])
         .order_by(LeadScore.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-        .all()
+        .limit(limit).offset(offset).all()
     )
-
-    return {
-    "data": [
-        {
-            "id": r.id,
-            "name": r.input_payload.get("name"),
-            "email": r.input_payload.get("email"),
-            "phone": r.input_payload.get("phone"),
-            "campaign": r.input_payload.get("campaign"),
-            "source": r.input_payload.get("source"),
-
-            "message": r.input_payload.get("message"),
-
-            "score": r.score,
-            "bucket": r.bucket,
-            "sentiment": r.sentiment,
-            "created_at": r.created_at.isoformat(),
-            "recommendation": r.ai_recommendation
-        }
-        for r in rows
-    ]
-}
+    return {"data": [{
+        "id":             r.id,
+        "name":           r.input_payload.get("name"),
+        "email":          r.input_payload.get("email"),
+        "phone":          r.input_payload.get("phone"),
+        "campaign":       r.input_payload.get("campaign"),
+        "source":         r.input_payload.get("source"),
+        "message":        r.input_payload.get("message"),
+        "score":          r.score,
+        "bucket":         r.bucket,
+        "sentiment":      r.sentiment,
+        "created_at":     r.created_at.isoformat(),
+        "recommendation": r.ai_recommendation
+    } for r in rows]}
 
 
-# Limit request size (prevents huge webhook bodies)
-
-
-
-
-@app.middleware("http")
-async def limit_body_size(request: Request, call_next):
-    # Skip ALL processing for webhook — let it pass through untouched
-    # Stripe signature verification needs raw headers and body intact
-    if "/billing/webhook" in request.url.path:
-        return await call_next(request)
-    
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 1000000:
-        raise HTTPException(status_code=413, detail="Payload too large")
-    
-    return await call_next(request)
-
-
-
-
-# --------------------------------------------------
-# Stats-Leads / DASHBOARD
-# --------------------------------------------------
-
+# ─────────────────────────────────────────────
+# GET /leads/stats
+# ─────────────────────────────────────────────
 @app.get("/leads/stats")
-def leads_stats(
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user)
-):
-
+def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
     bid = user["brokerage_id"]
-
-    def c(q):
-        return q.scalar() or 0
-
+    def c(q): return q.scalar() or 0
     return {
-
-        "total": c(
-            db.query(func.count(LeadScore.id))
-            .filter(LeadScore.brokerage_id == bid)
-        ),
-
-        "hot": c(
-            db.query(func.count(LeadScore.id))
-            .filter(
-                LeadScore.brokerage_id == bid,
-                LeadScore.bucket == "HOT"
-            )
-        ),
-
-        "warm": c(
-            db.query(func.count(LeadScore.id))
-            .filter(
-                LeadScore.brokerage_id == bid,
-                LeadScore.bucket == "WARM"
-            )
-        ),
-
-        "cold": c(
-            db.query(func.count(LeadScore.id))
-            .filter(
-                LeadScore.brokerage_id == bid,
-                LeadScore.bucket == "COLD"
-            )
-        ),
+        "total": c(db.query(func.count(LeadScore.id)).filter(
+            LeadScore.brokerage_id == bid)),
+        "hot":   c(db.query(func.count(LeadScore.id)).filter(
+            LeadScore.brokerage_id == bid, LeadScore.bucket == "HOT")),
+        "warm":  c(db.query(func.count(LeadScore.id)).filter(
+            LeadScore.brokerage_id == bid, LeadScore.bucket == "WARM")),
+        "cold":  c(db.query(func.count(LeadScore.id)).filter(
+            LeadScore.brokerage_id == bid, LeadScore.bucket == "COLD")),
     }
 
-# --------------------------------------------------
-# Email Verify 
-# --------------------------------------------------
 
-
-@app.get("/auth/verify")
-def verify_email(token: str, db: Session = Depends(get_db)):
-
-    row = db.execute(text("""
-        SELECT email
-        FROM email_verifications
-        WHERE token=:t AND expires_at > NOW() AND verified=false
-    """), {"t": token}).fetchone()
-
-    if not row:
-        raise HTTPException(400, "Invalid or expired token")
-
-    db.execute(text("""
-        UPDATE email_verifications
-        SET verified=true
-        WHERE email=:e
-    """), {"e": row.email})
-
-    db.commit()
-
-    return {"status": "verified"}
-
-
-
-# --------------------------------------------------
-# Magic link
-# --------------------------------------------------
-
-
-
+# ─────────────────────────────────────────────
+# GET /settings/connections
+# ─────────────────────────────────────────────
 @app.get("/settings/connections")
-def get_connections(
+def get_connections(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    bid = user["brokerage_id"]
+
+    # Also return the plugin API key so ConnectionsDetail can show it
+    row = db.execute(
+        text("SELECT api_key FROM brokerages WHERE id = :id"),
+        {"id": bid}
+    ).fetchone()
+
+    return {
+        "email_forwarding": f"leads+{bid}@leadrankerai.com",
+        "webhook_url":      f"https://api.leadrankerai.com/inbound/{bid}",
+        "plugin_api_key":   row.api_key if row else "",
+        "status":           "connected"
+    }
+
+
+# ─────────────────────────────────────────────
+# POST /api/v1/invite-partner
+# ─────────────────────────────────────────────
+@app.post("/api/v1/invite-partner")
+async def invite_partner(data: InviteInput, user=Depends(get_current_user)):
+    bid = user.get("brokerage_id")
+    try:
+        import resend
+        resend.Emails.send({
+            "from":    "LeadRanker <onboarding@leadrankerai.com>",
+            "to":      [data.email],
+            "subject": "Invitation to Connect: LeadRanker Tech Partnership",
+            "html":    f"""
+                <h3>Hello Developer,</h3>
+                <p>Webhook URL: https://api.leadrankerai.com/inbound/{bid}</p>
+                <p>Docs: <a href="https://api.leadrankerai.com/docs">API Docs</a></p>
+            """
+        })
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Resend error: {e}")
+        raise HTTPException(500, "Failed to send invite email")
+
+
+# ─────────────────────────────────────────────
+# GET /api/v1/billing/status
+# ─────────────────────────────────────────────
+@app.get("/api/v1/billing/status")
+def billing_status_route(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    bid = user["brokerage_id"]
-
-    email_forward = f"leads+{bid}@leadrankerai.com"
-    webhook_url = f"https://api.leadrankerai.com/inbound/{bid}"
-
+    status = get_billing_status(db, user["brokerage_id"])
+    row    = db.execute(
+        text("SELECT plan FROM brokerages WHERE id = :id"),
+        {"id": user["brokerage_id"]}
+    ).fetchone()
+    plan = row[0] if row else "trial"
+    PLAN_NAMES = {"trial": "Free Trial", "starter": "Starter", "team": "Team"}
     return {
-        "email_forwarding": email_forward,
-        "webhook_url": webhook_url,
-        "status": "connected"
+        "plan":      plan,
+        "plan_name": PLAN_NAMES.get(plan, plan.title()),
+        "usage":     status["usage"],
+        "limit":     status["limit"],
+        "remaining": status["remaining"],
+        "percent":   status["percent"],
+        "blocked":   status["blocked"],
     }
 
-#Google auth config
 
-@app.get("/auth/google/callback")
-async def google_callback(code: str, db: Session = Depends(get_db)):
-
-    # Exchange code for access token
-    async with httpx.AsyncClient() as client:
-        token_res = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code": code,
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code"
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-    token_data = token_res.json()
-    access_token = token_data.get("access_token")
-
-    if not access_token:
-        raise HTTPException(400, "Google auth failed")
-
-    # Get user info
-    async with httpx.AsyncClient() as client:
-        user_res = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
-
-    user_data = user_res.json()
-    email = user_data.get("email")
-
-    if not email:
-        raise HTTPException(400, "Email not provided")
-
-    # Check if user exists
-    row = db.execute(text("""
-        SELECT brokerage_id FROM users WHERE email=:e
-    """), {"e": email}).fetchone()
-
-    if row:
-        brokerage_id = row.brokerage_id
-    else:
-        # Create new brokerage + user
-        brokerage_id = str(uuid.uuid4())
-        user_id = str(uuid.uuid4())
-
-        db.execute(text("""
-            INSERT INTO brokerages (id,name,plan,industry)
-            VALUES (:i,:n,'trial','real_estate')
-        """), {"i": brokerage_id, "n": "Google User"})
-
-        db.execute(text("""
-            INSERT INTO users (id,email,hashed_password,brokerage_id)
-            VALUES (:i,:e,:p,:b)
-        """), {
-            "i": user_id,
-            "e": email,
-            "p": hash_password(str(uuid.uuid4())),
-            "b": brokerage_id
-        })
-
-        db.commit()
-
-    # ✅ CREATE JWT FOR BOTH CASES
-    jwt_token = create_jwt(brokerage_id, email)
-
-    # ✅ ALWAYS REDIRECT
-    frontend_url = f"http://localhost:5173/oauth-success?token={jwt_token}"
-
-    return RedirectResponse(url=frontend_url)
+# ─────────────────────────────────────────────
+# MIDDLEWARE  — OPTIONS must pass through for CORS
+# ─────────────────────────────────────────────
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if "/billing/webhook" in request.url.path:
+        return await call_next(request)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 1_000_000:
+        raise HTTPException(413, "Payload too large")
+    return await call_next(request)
 
 
-
-#Forgot password
-
-
-@app.post("/auth/forgot-password")
-def forgot_password(
-    data: ForgotPasswordInput,
-    db: Session = Depends(get_db)
-):
-    email = data.email
-
-    row = db.execute(
-        text("SELECT id FROM users WHERE email=:e"),
-        {"e": email}
-    ).fetchone()
-
-    if not row:
-        return {"message": "If account exists, reset link sent"}
-
-    # 🔥 Delete old tokens first
-    db.execute(text("""
-        DELETE FROM password_resets
-        WHERE email=:e
-    """), {"e": email})
-
-    token = str(uuid.uuid4())
-
-    db.execute(text("""
-        INSERT INTO password_resets (id,email,token,expires_at)
-        VALUES (:i,:e,:t,:x)
-    """), {
-        "i": str(uuid.uuid4()),
-        "e": email,
-        "t": token,
-        "x": datetime.utcnow() + timedelta(hours=1)
-    })
-
-    db.commit()
-
-    send_password_reset_email(email, token)
-
-    return {"message": "If account exists, reset link sent"}
-
-
-
-#Password Reset
-
-@app.post("/auth/reset-password")
-def reset_password(
-    data: ResetPasswordInput,
-    db: Session = Depends(get_db)
-):
-
-    # 🔎 Find valid token
-    row = db.execute(text("""
-        SELECT email
-        FROM password_resets
-        WHERE token=:t AND expires_at > NOW()
-    """), {"t": data.token}).fetchone()
-
-    if not row:
-        raise HTTPException(400, "Invalid or expired token")
-
-    # 🔐 Hash new password
-    new_hash = hash_password(data.password)
-
-    # 🔄 Update user password
-    db.execute(text("""
-        UPDATE users
-        SET hashed_password=:p
-        WHERE email=:e
-    """), {
-        "p": new_hash,
-        "e": row.email
-    })
-
-    # ❌ Delete reset token after use
-    db.execute(text("""
-        DELETE FROM password_resets
-        WHERE token=:t
-    """), {"t": data.token})
-
-    db.commit()
-
-    return {"message": "Password updated successfully"}
-
-
+# ─────────────────────────────────────────────
+# GET /health
+# ─────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-
-@app.post("/api/leads/test")
-async def test_lead(user_id: str):
-    # This manually inserts a "dummy" lead into your database for that user
-    # In your React app, you can poll a different endpoint to check if this exists
-    return {"status": "success", "message": "Test lead received!"}
-

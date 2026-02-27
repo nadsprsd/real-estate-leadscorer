@@ -19,6 +19,9 @@ import Settings from "./pages/Settings"
 import Analytics from "./pages/Analytics"
 import Billing from "./pages/Billing"
 import ConnectionsDetail from './pages/ConnectionsDetail';
+import TermsOfService from "./pages/TermsOfService"
+import PrivacyPolicy  from "./pages/PrivacyPolicy"
+import LeadPortal from "./pages/LeadPortal"
 
 import MainLayout from "./layouts/MainLayout"
 
@@ -58,6 +61,9 @@ export default function App() {
           <Route path="/connections" element={<ConnectionsDetail />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/billing" element={<Billing />} />
+          <Route path="/terms" element={<TermsOfService  />} />
+          <Route path="/privacy" element={<PrivacyPolicy />} />
+          <Route path="/portal" element={<LeadPortal />} />
           
 
         </Route>
