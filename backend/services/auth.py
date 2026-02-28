@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 
 from backend.db import get_db
 from backend.models import User
+from dotenv import load_dotenv
+import os
 
-
-SECRET_KEY = "dev-secret-key"
+  
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 
 security = HTTPBearer()
@@ -22,6 +24,24 @@ def create_access_token(data: dict):
     payload["exp"] = datetime.utcnow() + timedelta(days=7)
 
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+#JWT expiry 
+
+
+
+
+def create_jwt(brokerage_id: str, email: str) -> str:
+    expire = datetime.utcnow() + timedelta(days=7)
+    return jwt.encode(
+        {
+            "sub": email,
+            "brokerage_id": str(brokerage_id),
+            "iat": int(time.time()),
+            "exp": expire,
+        },
+        SECRET_KEY, algorithm=ALGORITHM
+    )
 
 
 # Get current logged in user

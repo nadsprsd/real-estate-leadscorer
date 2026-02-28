@@ -707,7 +707,7 @@ async def stripe_webhook(
     mark_webhook_processed(db, event_id, event_type)
     return {"status": "success", "event": event_type}
 
-
+"""
 # ─────────────────────────────────────────────
 # POST /admin/fix-plan  ← REMOVE IN PRODUCTION
 # ─────────────────────────────────────────────
@@ -728,3 +728,5 @@ async def admin_fix_plan(
     )
     db.commit()
     return {"status": "fixed", "plan": plan}
+
+    """

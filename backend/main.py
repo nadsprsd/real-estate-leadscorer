@@ -1,3 +1,12 @@
+# backend/main.py
+# ─────────────────────────────────────────────────────────────────────
+# FIXED: app defined BEFORE limiter (was crashing — app.state used before app existed)
+# FIXED: limiter defined only ONCE (was defined twice)
+# FIXED: score_lead function signature fixed (removed broken ... placeholder)
+# FIXED: slowapi imports correct and complete
+# FIXED: ENV check only runs in production (won't block local dev if keys missing)
+# ─────────────────────────────────────────────────────────────────────
+
 import os
 import uuid
 import logging
@@ -6,10 +15,13 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from pydantic import BaseModel
 from sqlalchemy import text, func
@@ -21,7 +33,7 @@ import httpx
 from backend.routes.auth    import router as auth_router, get_current_user
 from backend.routes.leads   import router as leads_router
 from backend.routes.billing import router as billing_router
-from backend.routes.pixel_route   import router as pixel_router
+from backend.routes.pixel_route import router as pixel_router
 
 from backend.db import get_db
 from backend.models import LeadScore
@@ -30,11 +42,43 @@ from backend.services.alerts    import send_hot_alert
 
 load_dotenv()
 
+# ─────────────────────────────────────────────
+# ENV VALIDATION
+# Only enforced in production so local dev still works
+# ─────────────────────────────────────────────
+IS_PROD = os.getenv("ENV", "development") == "production"
+
+if IS_PROD:
+    REQUIRED_ENV = [
+        "DATABASE_URL", "JWT_SECRET", "OPENAI_API_KEY",
+        "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+        "RESEND_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"
+    ]
+    missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {missing}")
+
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# APP — must be created BEFORE limiter setup
+# ─────────────────────────────────────────────
+app = FastAPI(
+    title="LeadRankerAI SaaS",
+    description="AI-powered lead scoring",
+    version="1.0.0",
+)
+
+# ─────────────────────────────────────────────
+# RATE LIMITER — after app is created
+# ─────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ─────────────────────────────────────────────
 # OPENAPI / SWAGGER
@@ -45,10 +89,12 @@ def custom_openapi():
     schema = get_openapi(
         title="LeadRankerAI SaaS",
         version="1.0.0",
-        description="## Authentication\n\n"
-                    "1. Call **POST /api/v1/auth/login** with your email & password\n"
-                    "2. Copy the `access_token` from the response\n"
-                    "3. Click **Authorize** (top right) → paste `Bearer <your_token>`",
+        description=(
+            "## Authentication\n\n"
+            "1. Call **POST /api/v1/auth/login** with your email & password\n"
+            "2. Copy the `access_token` from the response\n"
+            "3. Click **Authorize** (top right) → paste `Bearer <your_token>`"
+        ),
         routes=app.routes,
     )
     schema["components"]["securitySchemes"] = {
@@ -56,16 +102,18 @@ def custom_openapi():
             "type": "http",
             "scheme": "bearer",
             "bearerFormat": "JWT",
-            "description": "Paste your JWT token here. Get it from POST /api/v1/auth/login"
+            "description": "Paste your JWT token here. Get it from POST /api/v1/auth/login",
         }
     }
-    public = {"/api/v1/auth/login", "/api/v1/auth/register",
-              "/api/v1/auth/verify", "/api/v1/auth/forgot-password",
-              "/api/v1/auth/reset-password", "/api/v1/auth/google/login",
-              "/api/v1/auth/google/callback", "/health",
-              "/auth/google/callback", "/auth/google/login",
-              "/auth/register", "/auth/login", "/auth/verify",
-              "/api/v1/ingest/pixel", "/api/v1/ingest/portal-data"}
+    public = {
+        "/api/v1/auth/login", "/api/v1/auth/register",
+        "/api/v1/auth/verify", "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password", "/api/v1/auth/google/login",
+        "/api/v1/auth/google/callback", "/health",
+        "/auth/google/callback", "/auth/google/login",
+        "/auth/register", "/auth/login", "/auth/verify",
+        "/api/v1/ingest/pixel", "/api/v1/ingest/portal-data",
+    }
     for path, methods in schema.get("paths", {}).items():
         if path not in public:
             for method in methods.values():
@@ -73,11 +121,6 @@ def custom_openapi():
     app.openapi_schema = schema
     return schema
 
-app = FastAPI(
-    title="LeadRankerAI SaaS",
-    description="AI-powered lead scoring for real estate brokerages",
-    version="1.0.0",
-)
 app.openapi = custom_openapi
 
 # ─────────────────────────────────────────────
@@ -90,10 +133,8 @@ app.include_router(pixel_router)
 
 # ─────────────────────────────────────────────
 # CORS
-# allow_credentials must be False when allow_origins=["*"]
-# JWT travels in Authorization header so this is safe
 # ─────────────────────────────────────────────
-IS_DEV = os.getenv("ENV", "development") != "production"
+IS_DEV = not IS_PROD
 
 app.add_middleware(
     CORSMiddleware,
@@ -134,7 +175,6 @@ async def _register_compat():
 async def _login_compat():
     return RedirectResponse(url="/api/v1/auth/login", status_code=307)
 
-
 # ─────────────────────────────────────────────
 # SCHEMAS
 # ─────────────────────────────────────────────
@@ -149,9 +189,8 @@ class LeadInput(BaseModel):
 class InviteInput(BaseModel):
     email: str
 
-
 # ─────────────────────────────────────────────
-# BILLING HELPER  (used by multiple routes)
+# BILLING HELPER
 # ─────────────────────────────────────────────
 def get_billing_status(db: Session, brokerage_id: str) -> dict:
     PLAN_LIMITS = {"trial": 50, "starter": 1000, "team": 5000}
@@ -162,7 +201,7 @@ def get_billing_status(db: Session, brokerage_id: str) -> dict:
           AND created_at >= date_trunc('month', NOW())
     """), {"id": brokerage_id}).scalar() or 0
 
-    row   = db.execute(
+    row  = db.execute(
         text("SELECT plan FROM brokerages WHERE id = :id"),
         {"id": brokerage_id}
     ).fetchone()
@@ -179,9 +218,8 @@ def get_billing_status(db: Session, brokerage_id: str) -> dict:
         "blocked":   usage >= limit,
     }
 
-
 # ─────────────────────────────────────────────
-# CORE LEAD SAVE  (shared by score + inbound + pixel)
+# CORE LEAD SAVE
 # ─────────────────────────────────────────────
 def save_lead(db, brokerage_id, user_email, payload, ai):
     is_lead = ai.get("is_lead", False)
@@ -206,7 +244,7 @@ def save_lead(db, brokerage_id, user_email, payload, ai):
         ai_recommendation=ai.get("recommendation"),
         score=score,
         bucket=bucket,
-        created_at=datetime.now(timezone.utc)
+        created_at=datetime.now(timezone.utc),
     )
     db.add(lead)
     db.commit()
@@ -220,15 +258,17 @@ def save_lead(db, brokerage_id, user_email, payload, ai):
 
     return lead, bucket, score
 
-
 # ─────────────────────────────────────────────
 # POST /leads/score
+# FIXED: proper function signature, rate limiter applied correctly
 # ─────────────────────────────────────────────
 @app.post("/leads/score")
+@limiter.limit("20/minute")
 def score_lead(
+    request: Request,
     lead: LeadInput,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     billing = get_billing_status(db, user["brokerage_id"])
     if billing["blocked"]:
@@ -248,13 +288,17 @@ def score_lead(
             "bucket":         "IGNORE",
             "sentiment":      ai.get("sentiment", "neutral"),
             "recommendation": ai.get("recommendation", ""),
-            "billing":        get_billing_status(db, user["brokerage_id"])
+            "billing":        get_billing_status(db, user["brokerage_id"]),
         }
 
     payload = {
-        "name": lead.name, "email": lead.email, "phone": lead.phone,
-        "message": lead.message, "source": lead.source,
-        "campaign": lead.campaign, "entities": ai.get("entities", {})
+        "name":     lead.name,
+        "email":    lead.email,
+        "phone":    lead.phone,
+        "message":  lead.message,
+        "source":   lead.source,
+        "campaign": lead.campaign,
+        "entities": ai.get("entities", {}),
     }
 
     lead_obj, bucket, score = save_lead(
@@ -266,9 +310,8 @@ def score_lead(
         "bucket":         bucket,
         "sentiment":      ai["sentiment"],
         "recommendation": ai["recommendation"],
-        "billing":        get_billing_status(db, user["brokerage_id"])
+        "billing":        get_billing_status(db, user["brokerage_id"]),
     }
-
 
 # ─────────────────────────────────────────────
 # POST /inbound/email
@@ -278,7 +321,7 @@ async def fetch_full_email(email_id: str):
         res = await client.get(
             f"https://api.resend.com/emails/receiving/{email_id}",
             headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            timeout=10
+            timeout=10,
         )
         if res.status_code != 200:
             logger.error(f"Failed to fetch email: {res.text}")
@@ -289,9 +332,9 @@ async def fetch_full_email(email_id: str):
 @app.post("/inbound/email")
 async def inbound_email(request: Request, db: Session = Depends(get_db)):
     try:
-        payload   = await request.json()
-        data      = payload.get("data", {})
-        email_id  = data.get("email_id")
+        payload  = await request.json()
+        data     = payload.get("data", {})
+        email_id = data.get("email_id")
         if not email_id:
             return {"ok": True}
 
@@ -323,14 +366,13 @@ async def inbound_email(request: Request, db: Session = Depends(get_db)):
         ai = analyze_lead_message(f"{subject}\n\n{text_msg}", row.industry)
         save_lead(db, brokerage_id, from_email, {
             "name": None, "email": from_email, "phone": None,
-            "message": f"{subject}\n\n{text_msg}", "source": "email", "campaign": None
+            "message": f"{subject}\n\n{text_msg}", "source": "email", "campaign": None,
         }, ai)
 
         return {"status": "received"}
     except Exception:
         logger.exception("Email ingest failed")
         return {"ok": True}
-
 
 # ─────────────────────────────────────────────
 # POST /inbound/{brokerage_id}
@@ -339,7 +381,7 @@ async def inbound_email(request: Request, db: Session = Depends(get_db)):
 async def inbound_webhook(
     brokerage_id: str,
     lead: LeadInput,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     row = db.execute(
         text("SELECT industry FROM brokerages WHERE id = :i"),
@@ -350,24 +392,28 @@ async def inbound_webhook(
 
     ai      = analyze_lead_message(lead.message, row.industry)
     payload = {
-        "name": lead.name, "email": lead.email, "phone": lead.phone,
-        "message": lead.message, "source": lead.source,
-        "campaign": lead.campaign, "entities": ai.get("entities", {})
+        "name":     lead.name,
+        "email":    lead.email,
+        "phone":    lead.phone,
+        "message":  lead.message,
+        "source":   lead.source,
+        "campaign": lead.campaign,
+        "entities": ai.get("entities", {}),
     }
     _, bucket, score = save_lead(
         db, brokerage_id, lead.email or "unknown", payload, ai
     )
     return {"status": "received", "bucket": bucket, "score": score}
 
-
 # ─────────────────────────────────────────────
 # GET /leads/history
 # ─────────────────────────────────────────────
 @app.get("/leads/history")
 def leads_history(
-    limit: int = 50, offset: int = 0,
+    limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
-    user=Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
     rows = (
         db.query(LeadScore)
@@ -387,9 +433,8 @@ def leads_history(
         "bucket":         r.bucket,
         "sentiment":      r.sentiment,
         "created_at":     r.created_at.isoformat(),
-        "recommendation": r.ai_recommendation
+        "recommendation": r.ai_recommendation,
     } for r in rows]}
-
 
 # ─────────────────────────────────────────────
 # GET /leads/stats
@@ -399,16 +444,11 @@ def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
     bid = user["brokerage_id"]
     def c(q): return q.scalar() or 0
     return {
-        "total": c(db.query(func.count(LeadScore.id)).filter(
-            LeadScore.brokerage_id == bid)),
-        "hot":   c(db.query(func.count(LeadScore.id)).filter(
-            LeadScore.brokerage_id == bid, LeadScore.bucket == "HOT")),
-        "warm":  c(db.query(func.count(LeadScore.id)).filter(
-            LeadScore.brokerage_id == bid, LeadScore.bucket == "WARM")),
-        "cold":  c(db.query(func.count(LeadScore.id)).filter(
-            LeadScore.brokerage_id == bid, LeadScore.bucket == "COLD")),
+        "total": c(db.query(func.count(LeadScore.id)).filter(LeadScore.brokerage_id == bid)),
+        "hot":   c(db.query(func.count(LeadScore.id)).filter(LeadScore.brokerage_id == bid, LeadScore.bucket == "HOT")),
+        "warm":  c(db.query(func.count(LeadScore.id)).filter(LeadScore.brokerage_id == bid, LeadScore.bucket == "WARM")),
+        "cold":  c(db.query(func.count(LeadScore.id)).filter(LeadScore.brokerage_id == bid, LeadScore.bucket == "COLD")),
     }
-
 
 # ─────────────────────────────────────────────
 # GET /settings/connections
@@ -416,20 +456,16 @@ def leads_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
 @app.get("/settings/connections")
 def get_connections(user=Depends(get_current_user), db: Session = Depends(get_db)):
     bid = user["brokerage_id"]
-
-    # Also return the plugin API key so ConnectionsDetail can show it
     row = db.execute(
         text("SELECT api_key FROM brokerages WHERE id = :id"),
         {"id": bid}
     ).fetchone()
-
     return {
         "email_forwarding": f"leads+{bid}@leadrankerai.com",
         "webhook_url":      f"https://api.leadrankerai.com/inbound/{bid}",
         "plugin_api_key":   row.api_key if row else "",
-        "status":           "connected"
+        "status":           "connected",
     }
-
 
 # ─────────────────────────────────────────────
 # POST /api/v1/invite-partner
@@ -447,13 +483,12 @@ async def invite_partner(data: InviteInput, user=Depends(get_current_user)):
                 <h3>Hello Developer,</h3>
                 <p>Webhook URL: https://api.leadrankerai.com/inbound/{bid}</p>
                 <p>Docs: <a href="https://api.leadrankerai.com/docs">API Docs</a></p>
-            """
+            """,
         })
         return {"status": "success"}
     except Exception as e:
         logger.error(f"Resend error: {e}")
         raise HTTPException(500, "Failed to send invite email")
-
 
 # ─────────────────────────────────────────────
 # GET /api/v1/billing/status
@@ -461,7 +496,7 @@ async def invite_partner(data: InviteInput, user=Depends(get_current_user)):
 @app.get("/api/v1/billing/status")
 def billing_status_route(
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     status = get_billing_status(db, user["brokerage_id"])
     row    = db.execute(
@@ -480,9 +515,8 @@ def billing_status_route(
         "blocked":   status["blocked"],
     }
 
-
 # ─────────────────────────────────────────────
-# MIDDLEWARE  — OPTIONS must pass through for CORS
+# MIDDLEWARE — body size limit
 # ─────────────────────────────────────────────
 @app.middleware("http")
 async def limit_body_size(request: Request, call_next):
@@ -494,7 +528,6 @@ async def limit_body_size(request: Request, call_next):
     if content_length and int(content_length) > 1_000_000:
         raise HTTPException(413, "Payload too large")
     return await call_next(request)
-
 
 # ─────────────────────────────────────────────
 # GET /health

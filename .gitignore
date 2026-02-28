@@ -1,24 +1,42 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual env
-venv/
+# --- Security & Secrets (CRITICAL) ---
 .env
+.env.*
+!.env.example
+service-account.json
+firebase-key.json
+*.pem
+*.key
 
-# Jupyter
-.ipynb_checkpoints/
-
+# --- Python / FastAPI ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+*.db
+*.sqlite3
 alembic/versions/__pycache__/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+# --- Node / React ---
+node_modules/
+dist/
+build/
+.eslintcache
+.stylelintcache
 *.log
 
-#Audit
+# --- Stripe ---
+.stripe/
+
+# --- OS & System ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
 backend/audit.log
