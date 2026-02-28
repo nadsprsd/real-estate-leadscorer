@@ -1,3 +1,9 @@
+# backend/routes/billing.py
+# ─────────────────────────────────────────────────────────────────────
+# FIXED: REFERRAL_QUALIFY_DAYS = 30 everywhere (was "31 days" in email)
+# FIXED: /admin/fix-plan fully deleted (was wrapped in a string — still parsed by Python as dead code)
+# ─────────────────────────────────────────────────────────────────────
+
 import os
 import stripe
 import logging
@@ -10,11 +16,6 @@ from backend.routes.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────
-# CRITICAL RULE: prefix="/api/v1/billing"
-# All @router decorators must be SHORT paths like "/usage", "/checkout"
-# NEVER repeat /api/v1/billing inside decorators — it doubles the path!
-# ─────────────────────────────────────────────────────────────────────
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -22,20 +23,20 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
-REFERRAL_CREDIT_USD = 5
-REFERRAL_QUALIFY_DAYS = 30
+REFERRAL_CREDIT_USD   = 5
+REFERRAL_QUALIFY_DAYS = 30   # FIXED: was 30 in logic but "31 days" in emails — now 30 everywhere
 
 PLANS = {
     "starter": {
-        "limit": 1000,
-        "price_id": os.getenv("STRIPE_STARTER_PRICE"),
-        "amount": "$19/mo",
+        "limit":     1000,
+        "price_id":  os.getenv("STRIPE_STARTER_PRICE"),
+        "amount":    "$19/mo",
         "price_usd": 19,
     },
     "team": {
-        "limit": 5000,
-        "price_id": os.getenv("STRIPE_TEAM_PRICE"),
-        "amount": "$49/mo",
+        "limit":     5000,
+        "price_id":  os.getenv("STRIPE_TEAM_PRICE"),
+        "amount":    "$49/mo",
         "price_usd": 49,
     },
 }
@@ -117,14 +118,7 @@ def db_update_plan_by_customer(db, customer_id, plan, sub_id) -> int:
 
 
 # ─────────────────────────────────────────────
-# Idempotency  (requires webhook_events table)
-# Run once in psql:
-#   CREATE TABLE IF NOT EXISTS webhook_events (
-#     id SERIAL PRIMARY KEY,
-#     event_id TEXT UNIQUE NOT NULL,
-#     event_type TEXT,
-#     processed_at TIMESTAMPTZ DEFAULT NOW()
-#   );
+# Webhook Idempotency
 # ─────────────────────────────────────────────
 def is_webhook_processed(db, event_id: str) -> bool:
     try:
@@ -152,12 +146,12 @@ def mark_webhook_processed(db, event_id: str, event_type: str):
 
 
 # ─────────────────────────────────────────────
-# Emails
+# Email Helpers
 # ─────────────────────────────────────────────
 async def send_email(to: str, subject: str, html: str) -> bool:
     import httpx
     if not RESEND_API_KEY:
-        logger.warning("RESEND_API_KEY not set")
+        logger.warning("RESEND_API_KEY not set — skipping email")
         return False
     try:
         async with httpx.AsyncClient() as client:
@@ -165,11 +159,10 @@ async def send_email(to: str, subject: str, html: str) -> bool:
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
                 json={
-                    
-                    "from": "LeadRankerAI <onboarding@leadrankerai.com>",
-                    "to": [to],
+                    "from":    "LeadRankerAI <onboarding@leadrankerai.com>",
+                    "to":      [to],
                     "subject": subject,
-                    "html": html,
+                    "html":    html,
                 },
                 timeout=10,
             )
@@ -185,63 +178,64 @@ async def send_email(to: str, subject: str, html: str) -> bool:
 
 
 async def send_referral_email(to_email: str, referrer_name: str, referrer_email: str):
-    """
-    Sends the fully detailed referral invite using the send_email helper.
-    Restores the 'Reclaim Your Day' point and full styling.
-    """
     signup_url = f"{FRONTEND_URL}/register"
-    subject = f"{referrer_name or 'A friend'} invited you to LeadRankerAI"
-    
+    subject    = f"{referrer_name or 'A friend'} invited you to LeadRankerAI"
     html = f"""
-    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 40px 20px; color: #334155; border: 1px solid #f1f5f9; border-radius: 16px;">
-        <h2 style="color: #1e40af; font-size: 22px; margin-bottom: 20px;">You've been invited to LeadRankerAI 🚀</h2>
-        
-        <p style="font-size: 16px; line-height: 1.6;">
-            <strong>{referrer_name or referrer_email}</strong> thought you'd find this useful. 
-            <strong>LeadRankerAI</strong> is the intelligent assistant for Sales Agents, Business Development Executives, and Marketing Teams.
+    <div style="font-family:'Segoe UI',sans-serif;max-width:600px;margin:auto;padding:40px 20px;
+                color:#334155;border:1px solid #f1f5f9;border-radius:16px;">
+      <h2 style="color:#1e40af;font-size:22px;margin-bottom:20px;">
+        You've been invited to LeadRankerAI 🚀
+      </h2>
+      <p style="font-size:16px;line-height:1.6;">
+        <strong>{referrer_name or referrer_email}</strong> thought you'd find this useful.
+        <strong>LeadRankerAI</strong> is the intelligent assistant for Sales Agents,
+        Business Development Executives, and Marketing Teams.
+      </p>
+      <div style="background:#f8fafc;padding:24px;border-radius:16px;margin:24px 0;">
+        <p style="margin-top:0;font-weight:700;color:#64748b;font-size:12px;
+                  text-transform:uppercase;letter-spacing:0.1em;margin-bottom:16px;">
+          The Competitive Edge:
         </p>
-
-        <div style="background: #f8fafc; padding: 24px; border-radius: 16px; margin: 24px 0;">
-            <p style="margin-top: 0; font-weight: 700; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px;">
-                The Competitive Edge:
-            </p>
-            
-            <div style="margin-bottom: 16px;">
-                <span style="color: #2563eb; font-size: 18px; line-height: 1;">✦</span>
-                <span style="font-size: 15px; margin-left: 8px;"><strong>Score by Urgency:</strong> Our AI identifies high-intent patterns, so you know exactly who to call first.</span>
-            </div>
-            
-            <div style="margin-bottom: 16px;">
-                <span style="color: #2563eb; font-size: 18px; line-height: 1;">✦</span>
-                <span style="font-size: 15px; margin-left: 8px;"><strong>Instant HOT Alerts:</strong> Stop letting high-value leads cool off—spot them the second they arrive.</span>
-            </div>
-            
-            <div style="margin-bottom: 16px;">
-                <span style="color: #2563eb; font-size: 18px; line-height: 1;">✦</span>
-                <span style="font-size: 15px; margin-left: 8px;"><strong>Reclaim Your Day:</strong> Focus on closing deals while the AI handles the manual lead filtering.</span>
-            </div>
-
-            <p style="margin-bottom: 0; margin-top: 8px; font-weight: 600; color: #2563eb; font-size: 14px;">
-                Professional tools for high-performing agents, starting at $19/mo.
-            </p>
+        <div style="margin-bottom:16px;">
+          <span style="color:#2563eb;font-size:18px;">✦</span>
+          <span style="font-size:15px;margin-left:8px;">
+            <strong>Score by Urgency:</strong> Our AI identifies high-intent patterns,
+            so you know exactly who to call first.
+          </span>
         </div>
-
-        <a href="{signup_url}" 
-           style="display: inline-block; background: #2563eb; color: #ffffff; padding: 16px 36px; 
-                  border-radius: 12px; text-decoration: none; font-weight: bold; font-size: 16px;">
-            Start Your Free Trial →
-        </a>
-
-        <p style="color: #94a3b8; font-size: 12px; margin-top: 40px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-            Referred by {referrer_email} · LeadRankerAI
+        <div style="margin-bottom:16px;">
+          <span style="color:#2563eb;font-size:18px;">✦</span>
+          <span style="font-size:15px;margin-left:8px;">
+            <strong>Instant HOT Alerts:</strong> Stop letting high-value leads cool off —
+            spot them the second they arrive.
+          </span>
+        </div>
+        <div style="margin-bottom:16px;">
+          <span style="color:#2563eb;font-size:18px;">✦</span>
+          <span style="font-size:15px;margin-left:8px;">
+            <strong>Reclaim Your Day:</strong> Focus on closing deals while the AI
+            handles manual lead filtering.
+          </span>
+        </div>
+        <p style="margin-bottom:0;font-weight:600;color:#2563eb;font-size:14px;">
+          Starting at $19/mo. First 50 leads free.
         </p>
-    </div>
-    """
-    # This calls your centralized send_email logic which uses RESEND_API_KEY
+      </div>
+      <a href="{signup_url}"
+         style="display:inline-block;background:#2563eb;color:#fff;padding:16px 36px;
+                border-radius:12px;text-decoration:none;font-weight:bold;font-size:16px;">
+        Start Your Free Trial →
+      </a>
+      <p style="color:#94a3b8;font-size:12px;margin-top:40px;
+                border-top:1px solid #f1f5f9;padding-top:20px;">
+        Referred by {referrer_email} · LeadRankerAI
+      </p>
+    </div>"""
     return await send_email(to_email, subject, html)
 
 
 async def send_referee_joined_notification(referrer_email: str, referee_email: str):
+    # FIXED: says "30 days" not "31 days"
     await send_email(
         referrer_email,
         f"🎉 {referee_email} just joined LeadRankerAI!",
@@ -251,7 +245,7 @@ async def send_referee_joined_notification(referrer_email: str, referee_email: s
           <div style="background:#f0fdf4;border-left:4px solid #22c55e;padding:16px;border-radius:8px">
             <ul style="color:#16a34a;margin:0;padding-left:20px">
               <li>30-day qualification period has started</li>
-              <li>Stay subscribed and you get a <strong>$5 credit</strong> automatically on Day 31</li>
+              <li>Stay subscribed and you'll get a <strong>$5 credit</strong> automatically after 30 days</li>
             </ul>
           </div>
           <p style="margin-top:16px">
@@ -266,12 +260,16 @@ async def send_reward_notification(referrer_email: str, referee_email: str):
         referrer_email,
         "💰 You earned a $5 referral credit!",
         f"""<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:32px">
-          <div style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:28px;border-radius:12px;text-align:center">
+          <div style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:28px;
+                      border-radius:12px;text-align:center">
             <h1 style="color:#fff;margin:0">💰 $5 Credit Earned!</h1>
           </div>
           <h2 style="color:#1e293b;margin-top:24px">Congratulations!</h2>
-          <p style="color:#475569"><strong>{referee_email}</strong> completed 30 days — you're rewarded!</p>
-          <div style="background:#ecfdf5;border-left:4px solid #10b981;padding:16px;border-radius:8px;margin:20px 0">
+          <p style="color:#475569">
+            <strong>{referee_email}</strong> completed 30 days — you're rewarded!
+          </p>
+          <div style="background:#ecfdf5;border-left:4px solid #10b981;
+                      padding:16px;border-radius:8px;margin:20px 0">
             <ul style="color:#059669;margin:0;padding-left:20px">
               <li><strong>$5.00 credit</strong> applied to your account</li>
               <li>Automatically deducted from your next invoice</li>
@@ -310,41 +308,41 @@ async def get_usage(db: Session = Depends(get_db), user=Depends(get_current_user
         {"id": str(bid)},
     ).fetchone()
 
-    plan = (row[0] or "trial").lower() if row else "trial"
-    subscription_status = row[1] if row else "trial"
-    stripe_customer_id = row[2] if row else None
+    plan                   = (row[0] or "trial").lower() if row else "trial"
+    subscription_status    = row[1] if row else "trial"
+    stripe_customer_id     = row[2] if row else None
     stripe_subscription_id = row[3] if row else None
 
-    limit = PLAN_LIMITS.get(plan, 50)
+    limit     = PLAN_LIMITS.get(plan, 50)
     remaining = max(0, limit - usage_count)
-    percent = round((usage_count / limit) * 100, 1) if limit > 0 else 0
-    blocked = usage_count >= limit
+    percent   = round((usage_count / limit) * 100, 1) if limit > 0 else 0
+    blocked   = usage_count >= limit
 
     alerts = []
     if subscription_status == "past_due":
-        alerts.append({"type": "error", "message": "⚠️ Payment overdue. Update your payment method immediately."})
+        alerts.append({"type": "error",   "message": "⚠️ Payment overdue. Update your payment method immediately."})
     if blocked:
-        alerts.append({"type": "error", "message": "🚫 Monthly limit reached. Upgrade to continue scoring leads."})
+        alerts.append({"type": "error",   "message": "🚫 Monthly limit reached. Upgrade to continue scoring leads."})
     elif percent >= 90:
         alerts.append({"type": "warning", "message": f"⚠️ {int(percent)}% of monthly limit used. Upgrade soon."})
     elif percent >= 75:
-        alerts.append({"type": "info", "message": f"📊 You've used {int(percent)}% of your {plan} plan limit."})
+        alerts.append({"type": "info",    "message": f"📊 You've used {int(percent)}% of your {plan} plan limit."})
     if plan == "trial" and usage_count >= 25:
-        alerts.append({"type": "info", "message": "🚀 Enjoying LeadRankerAI? Upgrade to Starter for 1,000 leads/mo at just $19."})
+        alerts.append({"type": "info",    "message": "🚀 Enjoying LeadRankerAI? Upgrade to Starter for 1,000 leads/mo at $19."})
 
     logger.info(f"Usage | brokerage={bid} plan={plan} {usage_count}/{limit}")
 
     return {
-        "plan": plan,
-        "subscription_status": subscription_status,
-        "stripe_customer_id": stripe_customer_id,
-        "stripe_subscription_id": stripe_subscription_id,
-        "usage": usage_count,
-        "limit": limit,
-        "remaining": remaining,
-        "percent": percent,
-        "blocked": blocked,
-        "alerts": alerts,
+        "plan":                    plan,
+        "subscription_status":     subscription_status,
+        "stripe_customer_id":      stripe_customer_id,
+        "stripe_subscription_id":  stripe_subscription_id,
+        "usage":                   usage_count,
+        "limit":                   limit,
+        "remaining":               remaining,
+        "percent":                 percent,
+        "blocked":                 blocked,
+        "alerts":                  alerts,
     }
 
 
@@ -361,7 +359,7 @@ def get_plans():
 # ─────────────────────────────────────────────
 @router.post("/checkout")
 async def create_checkout(req: CheckoutRequest, user=Depends(get_current_user)):
-    bid = get_user_field(user, "brokerage_id")
+    bid   = get_user_field(user, "brokerage_id")
     email = get_user_field(user, "email")
     if not bid:
         raise HTTPException(status_code=400, detail="No brokerage linked")
@@ -402,7 +400,7 @@ async def verify_session(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    bid = get_user_field(user, "brokerage_id")
+    bid   = get_user_field(user, "brokerage_id")
     email = get_user_field(user, "email")
 
     try:
@@ -413,9 +411,9 @@ async def verify_session(
     if session.payment_status != "paid":
         raise HTTPException(status_code=402, detail=f"Payment not completed: {session.payment_status}")
 
-    plan = session.metadata.get("plan")
-    stripe_customer_id = session.customer
-    sub = session.subscription
+    plan                   = session.metadata.get("plan")
+    stripe_customer_id     = session.customer
+    sub                    = session.subscription
     stripe_subscription_id = sub.id if sub else None
 
     if not plan:
@@ -424,7 +422,6 @@ async def verify_session(
     rows = db_update_plan(db, str(bid), plan, stripe_customer_id, stripe_subscription_id)
     logger.info(f"Session verified | brokerage={bid} plan={plan} rows={rows}")
 
-    # Mark referral as qualified if this user was referred
     if email:
         referral = db.execute(
             text("""
@@ -472,34 +469,34 @@ async def get_referrals(db: Session = Depends(get_db), user=Depends(get_current_
 
     referrals = []
     for r in rows:
-        days = int(r[6] or 0) if r[6] is not None else None
+        days          = int(r[6] or 0) if r[6] is not None else None
         days_remaining = max(0, REFERRAL_QUALIFY_DAYS - days) if days is not None else None
         referrals.append({
-            "id": r[0],
-            "referee_email": r[1],
-            "status": r[2],
-            "submitted_at": r[3].isoformat() if r[3] else None,
-            "qualified_at": r[4].isoformat() if r[4] else None,
-            "rewarded_at": r[5].isoformat() if r[5] else None,
-            "credit_amount": REFERRAL_CREDIT_USD,
+            "id":                   r[0],
+            "referee_email":        r[1],
+            "status":               r[2],
+            "submitted_at":         r[3].isoformat() if r[3] else None,
+            "qualified_at":         r[4].isoformat() if r[4] else None,
+            "rewarded_at":          r[5].isoformat() if r[5] else None,
+            "credit_amount":        REFERRAL_CREDIT_USD,
             "days_since_qualified": days,
-            "days_remaining": days_remaining,
+            "days_remaining":       days_remaining,
         })
 
-    rewarded = sum(1 for r in referrals if r["status"] == "rewarded")
-    pending = sum(1 for r in referrals if r["status"] == "pending")
+    rewarded  = sum(1 for r in referrals if r["status"] == "rewarded")
+    pending   = sum(1 for r in referrals if r["status"] == "pending")
     qualified = sum(1 for r in referrals if r["status"] == "qualified")
 
     return {
         "referrals": referrals,
         "stats": {
-            "total": len(referrals),
-            "pending": pending,
-            "qualified": qualified,
-            "rewarded": rewarded,
-            "total_earned_usd": rewarded * REFERRAL_CREDIT_USD,
+            "total":             len(referrals),
+            "pending":           pending,
+            "qualified":         qualified,
+            "rewarded":          rewarded,
+            "total_earned_usd":  rewarded * REFERRAL_CREDIT_USD,
             "credit_per_referral": REFERRAL_CREDIT_USD,
-            "qualify_days": REFERRAL_QUALIFY_DAYS,
+            "qualify_days":      REFERRAL_QUALIFY_DAYS,
         },
     }
 
@@ -513,7 +510,7 @@ async def submit_referral(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    bid = get_user_field(user, "brokerage_id")
+    bid            = get_user_field(user, "brokerage_id")
     referrer_email = get_user_field(user, "email") or ""
 
     if not bid:
@@ -537,29 +534,26 @@ async def submit_referral(
 
     db.execute(
         text("""
-            INSERT INTO referrals (referrer_brokerage_id, referrer_email, referee_email, status, submitted_at, created_at)
+            INSERT INTO referrals
+              (referrer_brokerage_id, referrer_email, referee_email, status, submitted_at, created_at)
             VALUES (:bid, :remail, :femail, 'pending', NOW(), NOW())
         """),
         {"bid": str(bid), "remail": referrer_email, "femail": data.referee_email},
     )
     db.commit()
 
-    name_row = db.execute(
-        text("SELECT name FROM brokerages WHERE id::text=:bid"),
-        {"bid": str(bid)},
+    name_row      = db.execute(
+        text("SELECT name FROM brokerages WHERE id::text=:bid"), {"bid": str(bid)}
     ).fetchone()
     referrer_name = name_row[0] if name_row else referrer_email
 
     await send_referral_email(data.referee_email, referrer_name, referrer_email)
-    
     logger.info(f"Referral submitted | {referrer_email} → {data.referee_email}")
     return {"status": "submitted", "message": f"Invite sent to {data.referee_email}"}
 
 
 # ─────────────────────────────────────────────
 # POST /webhook
-# Stripe CLI must forward to: localhost:8000/api/v1/billing/webhook
-# Command: stripe listen --forward-to localhost:8000/api/v1/billing/webhook
 # ─────────────────────────────────────────────
 @router.post("/webhook")
 async def stripe_webhook(
@@ -567,7 +561,6 @@ async def stripe_webhook(
     db: Session = Depends(get_db),
     stripe_signature: str = Header(None, alias="stripe-signature"),
 ):
-    print("WEBHOOK RECEIVED")
     payload = await request.body()
 
     if not stripe_signature:
@@ -581,23 +574,22 @@ async def stripe_webhook(
     except Exception:
         raise HTTPException(status_code=400, detail="Webhook parse error")
 
-    event_id = event["id"]
+    event_id   = event["id"]
     event_type = event["type"]
-    data = event["data"]["object"]
+    data       = event["data"]["object"]
 
     logger.info(f"Stripe event: {event_type} [{event_id}]")
 
-    # Idempotency: skip duplicate events
     if is_webhook_processed(db, event_id):
         logger.info(f"Already processed {event_id}, skipping")
         return {"status": "skipped"}
 
     if event_type == "checkout.session.completed":
-        bid = data.get("client_reference_id")
-        plan = data.get("metadata", {}).get("plan")
-        stripe_customer_id = data.get("customer")
+        bid                    = data.get("client_reference_id")
+        plan                   = data.get("metadata", {}).get("plan")
+        stripe_customer_id     = data.get("customer")
         stripe_subscription_id = data.get("subscription")
-        referee_email = data.get("customer_email")
+        referee_email          = data.get("customer_email")
 
         if bid and plan:
             try:
@@ -622,19 +614,19 @@ async def stripe_webhook(
                 logger.error(f"checkout.session.completed error: {e}")
 
     elif event_type == "invoice.payment_succeeded":
-        stripe_customer_id = data.get("customer")
+        stripe_customer_id     = data.get("customer")
         stripe_subscription_id = data.get("subscription")
-        billing_reason = data.get("billing_reason", "")
+        billing_reason         = data.get("billing_reason", "")
 
         try:
             plan = None
-            bid = None
+            bid  = None
             if stripe_subscription_id:
-                sub = stripe.Subscription.retrieve(stripe_subscription_id)
-                bid = sub.metadata.get("brokerage_id")
+                sub      = stripe.Subscription.retrieve(stripe_subscription_id)
+                bid      = sub.metadata.get("brokerage_id")
                 plan_meta = sub.metadata.get("plan")
-                price_id = sub["items"]["data"][0]["price"]["id"]
-                plan = plan_meta or price_id_to_plan(price_id)
+                price_id  = sub["items"]["data"][0]["price"]["id"]
+                plan      = plan_meta or price_id_to_plan(price_id)
 
             if plan:
                 rows = db_update_plan(db, bid, plan, stripe_customer_id, stripe_subscription_id) if bid else 0
@@ -642,7 +634,6 @@ async def stripe_webhook(
                     rows = db_update_plan_by_customer(db, stripe_customer_id, plan, stripe_subscription_id)
                 logger.info(f"Plan updated rows={rows}")
 
-            # Referral reward: fires on Day 31 renewal payment
             if billing_reason == "subscription_cycle":
                 qualified = db.execute(
                     text("""
@@ -693,6 +684,7 @@ async def stripe_webhook(
             db.commit()
         except Exception as e:
             db.rollback()
+            logger.error(f"invoice.payment_failed update error: {e}")
 
     elif event_type == "customer.subscription.deleted":
         try:
@@ -703,30 +695,8 @@ async def stripe_webhook(
             db.commit()
         except Exception as e:
             db.rollback()
+            logger.error(f"subscription.deleted update error: {e}")
 
     mark_webhook_processed(db, event_id, event_type)
     return {"status": "success", "event": event_type}
 
-"""
-# ─────────────────────────────────────────────
-# POST /admin/fix-plan  ← REMOVE IN PRODUCTION
-# ─────────────────────────────────────────────
-@router.post("/admin/fix-plan")
-async def admin_fix_plan(
-    plan: str = "starter",
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    bid = get_user_field(user, "brokerage_id")
-    if not bid:
-        raise HTTPException(status_code=400, detail="No brokerage found")
-    if plan not in PLANS and plan != "trial":
-        raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}")
-    db.execute(
-        text("UPDATE brokerages SET plan=:plan, subscription_status='active', updated_at=NOW() WHERE id::text=:bid"),
-        {"plan": plan, "bid": str(bid)},
-    )
-    db.commit()
-    return {"status": "fixed", "plan": plan}
-
-    """
