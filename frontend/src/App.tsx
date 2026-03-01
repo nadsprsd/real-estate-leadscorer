@@ -7,27 +7,29 @@ import {
 
 import { useAuthStore } from "./store/authStore"
 
-import Login from "./pages/Login"
-import Register from "./pages/Register"
+// Public pages
+import Login          from "./pages/Login"
+import Register       from "./pages/Register"
 import ForgotPassword from "./pages/ForgotPassword"
-import ResetPassword from "./pages/ResetPassword"
-import OAuthSuccess from "./pages/OAuthSuccess"
-
-import Dashboard from "./pages/Dashboard"
-import History from "./pages/History"
-import Settings from "./pages/Settings"
-import Analytics from "./pages/Analytics"
-import Billing from "./pages/Billing"
-import ConnectionsDetail from './pages/ConnectionsDetail';
+import ResetPassword  from "./pages/ResetPassword"
+import OAuthSuccess   from "./pages/OAuthSuccess"
 import TermsOfService from "./pages/TermsOfService"
 import PrivacyPolicy  from "./pages/PrivacyPolicy"
-import LeadPortal from "./pages/LeadPortal"
+import LeadPortal     from "./pages/LeadPortal"   // ← PUBLIC: leads land here, no login needed
+
+// Protected pages
+import Dashboard       from "./pages/Dashboard"
+import History         from "./pages/History"
+import Settings        from "./pages/Settings"
+import Analytics       from "./pages/Analytics"
+import Billing         from "./pages/Billing"
+import ConnectionsDetail from "./pages/ConnectionsDetail"
 
 import MainLayout from "./layouts/MainLayout"
 
+// ── Protected route wrapper ────────────────────────────────────────────────
 function ProtectedRoute() {
-
-  const token = useAuthStore((s) => s.token)
+  const token       = useAuthStore((s) => s.token)
   const storedToken = localStorage.getItem("token")
 
   if (!token && !storedToken) {
@@ -37,42 +39,42 @@ function ProtectedRoute() {
   return <MainLayout />
 }
 
+// ── App ───────────────────────────────────────────────────────────────────
 export default function App() {
-
   return (
-
     <BrowserRouter>
-
       <Routes>
 
-        {/* Public */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
+        {/* ── FULLY PUBLIC — no login required ──────────────────────────
+            These must be OUTSIDE ProtectedRoute.
+            /portal  → leads land here after form submission (no account)
+            /terms   → legal pages must be publicly accessible
+            /privacy → same
+        ──────────────────────────────────────────────────────────────── */}
+        <Route path="/login"          element={<Login />} />
+        <Route path="/register"       element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/reset-password" element={<ResetPassword />} />
-        <Route path="/oauth-success" element={<OAuthSuccess />} />
+        <Route path="/oauth-success"  element={<OAuthSuccess />} />
+        <Route path="/portal"         element={<LeadPortal />} />
+        <Route path="/terms"          element={<TermsOfService />} />
+        <Route path="/privacy"        element={<PrivacyPolicy />} />
 
-        {/* Protected layout wrapper */}
+        {/* ── PROTECTED — must be logged in ─────────────────────────── */}
         <Route element={<ProtectedRoute />}>
-
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/"            element={<Dashboard />} />
+          <Route path="/dashboard"   element={<Dashboard />} />
+          <Route path="/history"     element={<History />} />
+          <Route path="/settings"    element={<Settings />} />
           <Route path="/connections" element={<ConnectionsDetail />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="/billing" element={<Billing />} />
-          <Route path="/terms" element={<TermsOfService  />} />
-          <Route path="/privacy" element={<PrivacyPolicy />} />
-          <Route path="/portal" element={<LeadPortal />} />
-          
-
+          <Route path="/analytics"   element={<Analytics />} />
+          <Route path="/billing"     element={<Billing />} />
         </Route>
 
-        <Route path="*" element={<Navigate to="/" />} />
+        {/* ── Catch-all ─────────────────────────────────────────────── */}
+        <Route path="*" element={<Navigate to="/" replace />} />
 
       </Routes>
-
     </BrowserRouter>
-
   )
 }

@@ -26,32 +26,54 @@ export default function Login() {
   }
 
   async function handleLogin(e: React.FormEvent) {
-    e.preventDefault()
-    setLoading(true)
-    setError("")
+  e.preventDefault()
+  setLoading(true)
+  setError("")
+
+  try {
+    clearSession()
+
+    const res = await fetch(`${API}/api/v1/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: email.trim(),
+        password: password.trim(),
+      }),
+    })
+
+    // SAFELY read response text first
+    const text = await res.text()
+
+    let data
     try {
-      clearSession()
-      const res = await fetch(`${API}/api/v1/auth/login`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ email, password }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(data?.detail || `Login failed (${res.status})`)
-      }
-      if (!data.access_token) {
-        throw new Error("No token returned by server")
-      }
-      setToken(data.access_token)
-      window.location.href = "/dashboard"
-    } catch (err: any) {
-      clearSession()
-      setError(err?.message || "Login failed. Check your credentials.")
-    } finally {
-      setLoading(false)
+      data = JSON.parse(text)
+    } catch {
+      throw new Error("Server returned invalid response")
     }
+
+    if (!res.ok) {
+      throw new Error(data?.detail || `Login failed (${res.status})`)
+    }
+
+    if (!data.access_token) {
+      throw new Error("No token returned by server")
+    }
+
+    setToken(data.access_token)
+
+    // Use replace instead of href (better for SPA)
+    window.location.replace("/dashboard")
+
+  } catch (err: any) {
+    clearSession()
+    setError(err?.message || "Login failed. Please try again.")
+  } finally {
+    setLoading(false)
   }
+}
 
   // FIXED: Direct redirect instead of fetch — no CORS error
   function handleGoogleLogin() {
