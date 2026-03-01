@@ -6,7 +6,6 @@ import { Loader2, Eye, EyeOff, CheckCircle } from "lucide-react"
 const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
 
 export default function Login() {
-  // ── ONE value per useAuthStore call — prevents infinite loop
   const setToken = useAuthStore((s) => s.setToken)
   const logout   = useAuthStore((s) => s.logout)
 
@@ -17,7 +16,6 @@ export default function Login() {
   const [error,         setError]         = useState("")
   const [showPassword,  setShowPassword]  = useState(false)
   const [verifiedMsg,   setVerifiedMsg]   = useState(
-    // Show success toast if redirected here after email verification
     new URLSearchParams(window.location.search).get("verified") === "true"
   )
 
@@ -27,29 +25,39 @@ export default function Login() {
     sessionStorage.clear()
   }
 
-    function handleGoogleLogin() {
-  setGoogleLoading(true)
-  clearSession()
-  window.location.href = `${API}/api/v1/auth/google/login`
-}
-
-  async function handleGoogleLogin() {
-    setGoogleLoading(true)
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault()
+    setLoading(true)
     setError("")
     try {
       clearSession()
-
-      const res = await fetch(`${API}/api/v1/auth/google/login`)
-      if (!res.ok) throw new Error(`Server error ${res.status}`)
-
+      const res = await fetch(`${API}/api/v1/auth/login`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ email, password }),
+      })
       const data = await res.json()
-      if (!data.auth_url) throw new Error("No auth URL returned from server")
-
-      window.location.href = data.auth_url
+      if (!res.ok) {
+        throw new Error(data?.detail || `Login failed (${res.status})`)
+      }
+      if (!data.access_token) {
+        throw new Error("No token returned by server")
+      }
+      setToken(data.access_token)
+      window.location.href = "/dashboard"
     } catch (err: any) {
-      setError(`Google login failed: ${err?.message}`)
-      setGoogleLoading(false)
+      clearSession()
+      setError(err?.message || "Login failed. Check your credentials.")
+    } finally {
+      setLoading(false)
     }
+  }
+
+  // FIXED: Direct redirect instead of fetch — no CORS error
+  function handleGoogleLogin() {
+    setGoogleLoading(true)
+    clearSession()
+    window.location.href = `${API}/api/v1/auth/google/login`
   }
 
   return (
