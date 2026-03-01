@@ -27,40 +27,11 @@ export default function Login() {
     sessionStorage.clear()
   }
 
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault()
-    setLoading(true)
-    setError("")
-
-    try {
-      clearSession()
-
-      const res = await fetch(`${API}/api/v1/auth/login`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ email, password }),
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        throw new Error(data?.detail || `Login failed (${res.status})`)
-      }
-      if (!data.access_token) {
-        throw new Error("No token returned by server")
-      }
-
-      setToken(data.access_token)
-      // Hard navigate — remounts all components fresh, no stale state
-      window.location.href = "/dashboard"
-
-    } catch (err: any) {
-      clearSession()
-      setError(err?.message || "Login failed. Check your credentials.")
-    } finally {
-      setLoading(false)
-    }
-  }
+    function handleGoogleLogin() {
+  setGoogleLoading(true)
+  clearSession()
+  window.location.href = `${API}/api/v1/auth/google/login`
+}
 
   async function handleGoogleLogin() {
     setGoogleLoading(true)
