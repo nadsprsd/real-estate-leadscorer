@@ -340,7 +340,7 @@ export default function ConnectionsDetail() {
                     )}
                   </div>
                 </div>
-                <a href="/leadranker-ai.zip" download
+                <a href="https://api.leadrankerai.com/static/leadranker-ai.zip" download
                   className="flex items-center justify-center gap-2 w-full bg-blue-600 text-white
                     py-3 rounded-2xl font-bold text-sm hover:bg-blue-700 transition-all">
                   <Download size={16} /> Download WordPress Plugin (.zip)
