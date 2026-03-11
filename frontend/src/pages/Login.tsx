@@ -1,218 +1,142 @@
-import { useState } from "react"
-import { useAuthStore } from "../store/auth"
-import { Link } from "react-router-dom"
-import { Loader2, Eye, EyeOff, CheckCircle } from "lucide-react"
-
-const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
+import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { Loader2, Mail, Lock } from "lucide-react";
+import { useAuthStore } from "../store/authStore";
 
 export default function Login() {
-  const setToken = useAuthStore((s) => s.setToken)
-  const logout   = useAuthStore((s) => s.logout)
+  const navigate = useNavigate();
+  const setToken = useAuthStore((s) => s.setToken);
+  const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({ email: "", password: "" });
 
-  const [email,         setEmail]         = useState("")
-  const [password,      setPassword]      = useState("")
-  const [loading,       setLoading]       = useState(false)
-  const [googleLoading, setGoogleLoading] = useState(false)
-  const [error,         setError]         = useState("")
-  const [showPassword,  setShowPassword]  = useState(false)
-  const [verifiedMsg,   setVerifiedMsg]   = useState(
-    new URLSearchParams(window.location.search).get("verified") === "true"
-  )
+  const API_URL = "https://api.leadrankerai.com";
 
-  function clearSession() {
-    logout()
-    localStorage.clear()
-    sessionStorage.clear()
-  }
-
-  async function handleLogin(e: React.FormEvent) {
-  e.preventDefault()
-  setLoading(true)
-  setError("")
-
-  try {
-    clearSession()
-
-    const res = await fetch(`${API}/api/v1/auth/login`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        email: email.trim(),
-        password: password.trim(),
-      }),
-    })
-
-    // SAFELY read response text first
-    const text = await res.text()
-
-    let data
+  // FIX FOR GOOGLE LOGIN
+  const handleGoogleLogin = async () => {
+    setGoogleLoading(true);
+    setError("");
     try {
-      data = JSON.parse(text)
-    } catch {
-      throw new Error("Server returned invalid response")
+      const response = await fetch(`${API_URL}/api/v1/auth/google/login`);
+      const data = await response.json();
+
+      if (data.auth_url) {
+        // THIS IS THE CRITICAL LINE: It redirects the browser to Google
+        window.location.href = data.auth_url;
+      } else {
+        throw new Error("Could not get Google Auth URL");
+      }
+    } catch (err: any) {
+      setError("Google Login failed. Please try again.");
+      setGoogleLoading(false);
     }
+  };
 
-    if (!res.ok) {
-      throw new Error(data?.detail || `Login failed (${res.status})`)
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_URL}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Login failed");
+
+      setToken(data.access_token);
+      navigate("/");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
-
-    if (!data.access_token) {
-      throw new Error("No token returned by server")
-    }
-
-    setToken(data.access_token)
-
-    // Use replace instead of href (better for SPA)
-    window.location.replace("/dashboard")
-
-  } catch (err: any) {
-    clearSession()
-    setError(err?.message || "Login failed. Please try again.")
-  } finally {
-    setLoading(false)
-  }
-}
-
-  // FIXED: Direct redirect instead of fetch — no CORS error
-  function handleGoogleLogin() {
-    setGoogleLoading(true)
-    clearSession()
-    window.location.href = `${API}/api/v1/auth/google/login`
-  }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
-      <div className="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-xl p-10">
-
-        {/* Logo */}
+      <div className="bg-white w-full max-w-md rounded-2xl shadow-xl p-8 border border-slate-100">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-black tracking-tight mb-2">
-            <span className="text-blue-600">Lead</span>RankerAI
-          </h1>
-          <p className="text-sm text-slate-500">Sign in to your dashboard</p>
+          <h1 className="text-3xl font-bold text-slate-900">Welcome Back</h1>
+          <p className="text-slate-500 mt-2">Sign in to LeadRanker AI</p>
         </div>
 
-        {/* Email verified success banner */}
-        {verifiedMsg && (
-          <div className="flex items-center gap-2 bg-green-50 border border-green-200
-            text-green-700 text-sm font-medium p-3 rounded-xl mb-4">
-            <CheckCircle size={16} className="flex-shrink-0" />
-            <span>Email verified! You can now sign in.</span>
-            <button onClick={() => setVerifiedMsg(false)} className="ml-auto opacity-60 hover:opacity-100">✕</button>
+        {error && (
+          <div className="mb-6 p-3 bg-red-50 border border-red-100 text-red-600 text-sm rounded-lg text-center">
+            {error}
           </div>
         )}
 
         <form onSubmit={handleLogin} className="space-y-4">
-
           <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest ml-1 mb-1.5">
-              Email
-            </label>
-            <input
-              type="email"
-              placeholder="name@agency.com"
-              required
-              autoComplete="email"
-              className="w-full border border-slate-200 focus:border-blue-500 focus:ring-2
-                focus:ring-blue-100 rounded-xl px-4 py-3 text-sm outline-none transition-all"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">
-                Password
-              </label>
-              <Link to="/forgot-password" className="text-xs text-blue-600 hover:underline font-medium">
-                Forgot password?
-              </Link>
-            </div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
             <div className="relative">
+              <Mail className="absolute left-3 top-3 text-slate-400" size={18} />
               <input
-                type={showPassword ? "text" : "password"}
-                placeholder="••••••••"
+                type="email"
                 required
-                autoComplete="current-password"
-                className="w-full border border-slate-200 focus:border-blue-500 focus:ring-2
-                  focus:ring-blue-100 rounded-xl px-4 py-3 pr-11 text-sm outline-none transition-all"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="nandu@example.com"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                tabIndex={-1}
-              >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
             </div>
           </div>
 
-          {error && (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-200
-              text-red-700 text-xs font-semibold p-3 rounded-xl">
-              <span className="mt-0.5 flex-shrink-0">⚠</span>
-              <span>{error}</span>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+            <div className="relative">
+              <Lock className="absolute left-3 top-3 text-slate-400" size={18} />
+              <input
+                type="password"
+                required
+                className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="••••••••"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
             </div>
-          )}
+          </div>
 
           <button
-            type="submit"
-            disabled={loading || !email || !password}
-            className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold
-              hover:bg-blue-700 transition-all shadow-lg shadow-blue-200
-              disabled:opacity-50 disabled:cursor-not-allowed
-              flex items-center justify-center gap-2"
+            disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition flex items-center justify-center gap-2"
           >
-            {loading
-              ? <><Loader2 size={16} className="animate-spin" /> Signing in...</>
-              : "Sign in"}
+            {loading ? <Loader2 className="animate-spin" size={20} /> : "Sign In"}
           </button>
-
         </form>
 
-        {/* Divider */}
-        <div className="flex items-center my-8">
-          <div className="flex-1 border-t border-slate-200" />
-          <span className="px-4 text-xs font-bold uppercase tracking-widest text-slate-400">or</span>
-          <div className="flex-1 border-t border-slate-200" />
+        <div className="relative my-8">
+          <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200"></span></div>
+          <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-500">Or continue with</span></div>
         </div>
 
-        {/* Google */}
         <button
           onClick={handleGoogleLogin}
           disabled={googleLoading}
-          className="w-full border border-slate-200 rounded-xl py-3 text-sm font-semibold
-            hover:bg-slate-50 transition flex items-center justify-center gap-3 disabled:opacity-60"
+          className="w-full border border-slate-200 rounded-xl py-3 hover:bg-slate-50 transition flex items-center justify-center gap-3 font-medium text-slate-700"
         >
           {googleLoading ? (
-            <><Loader2 size={16} className="animate-spin" /> Redirecting to Google...</>
+            <Loader2 size={18} className="animate-spin" />
           ) : (
             <>
               <svg width="18" height="18" viewBox="0 0 48 48">
                 <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
                 <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24s.92 7.54 2.56 10.78l7.97-6.19z"/>
                 <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
               </svg>
-              Continue with Google
+              Google
             </>
           )}
         </button>
 
-        <div className="text-center mt-8 pt-6 border-t border-slate-100">
-          <p className="text-sm text-slate-500">
-            Don't have an account?{" "}
-            <Link to="/register" className="font-bold text-blue-600 hover:underline">Create one free</Link>
-          </p>
-        </div>
-
+        <p className="text-center mt-8 text-sm text-slate-500">
+          Don't have an account? <Link to="/register" className="font-bold text-blue-600 hover:underline">Register</Link>
+        </p>
       </div>
     </div>
-  )
+  );
 }
