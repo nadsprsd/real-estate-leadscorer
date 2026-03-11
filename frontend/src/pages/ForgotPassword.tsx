@@ -11,7 +11,7 @@ export default function ForgotPassword() {
 
   try {
 
-    await api.post("/auth/forgot-password", { email });
+    await api.post("/api/v1/auth/forgot-password", { email });
 
     setMessage("Reset email sent.");
 
@@ -38,7 +38,7 @@ export default function ForgotPassword() {
             onChange={(e) => setEmail(e.target.value)}
           />
 
-          <button className="w-full bg-dark text-white py-2 rounded">
+          <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition">
             Send Reset Link
           </button>
         </form>

@@ -1,6 +1,7 @@
 import os
 import uuid
 import time
+import secrets
 import logging
 from datetime import datetime, timedelta
 
@@ -21,9 +22,9 @@ from backend.services.email_verify import send_verify_email, send_password_reset
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
-SECRET_KEY   = os.getenv("JWT_SECRET", os.getenv("JWT_SECRET_KEY", "change-me"))
-ALGORITHM    = "HS256"
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+SECRET_KEY     = os.getenv("JWT_SECRET", os.getenv("JWT_SECRET_KEY", "change-me"))
+ALGORITHM      = "HS256"
+FRONTEND_URL   = os.getenv("FRONTEND_URL", "http://localhost:5173")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID")
@@ -74,6 +75,10 @@ def hash_password(p: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
+def generate_api_key() -> str:
+    """Generate a unique API key like lraiABC123..."""
+    return "lrai" + secrets.token_hex(16)
 
 def create_jwt(brokerage_id: str, email: str) -> str:
     return jwt.encode(
@@ -127,13 +132,11 @@ def get_current_user(
 # WELCOME EMAIL
 # ─────────────────────────────────────────────
 async def send_welcome_email(email: str, name: str):
-    """Sends a welcome email after successful registration."""
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — skipping welcome email")
         return
     try:
-        import httpx as _httpx
-        async with _httpx.AsyncClient() as client:
+        async with httpx.AsyncClient() as client:
             await client.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
@@ -148,21 +151,21 @@ async def send_welcome_email(email: str, name: str):
                       <p style="font-size:16px;color:#64748b">Hi {name},</p>
                       <p style="font-size:15px;line-height:1.7">
                         You're now set up with a <strong>Free Trial</strong> — 50 AI lead scores
-                        to get you started. Here's what you can do right now:
+                        to get you started.
                       </p>
                       <div style="background:#f8fafc;border-radius:12px;padding:20px;margin:24px 0">
                         <p style="margin:0 0 8px;font-weight:700;color:#1e293b">🚀 Quick Start:</p>
                         <ul style="color:#475569;line-height:2;margin:0;padding-left:20px">
+                          <li>Go to <strong>Connections</strong> to get your API key</li>
                           <li>Paste a lead message to get an instant AI score</li>
                           <li>Set up email forwarding to auto-score inbound leads</li>
-                          <li>Invite your team and refer colleagues to earn credits</li>
                         </ul>
                       </div>
                       <div style="background:#eff6ff;border-left:4px solid #2563eb;
                                   padding:16px;border-radius:8px;margin-bottom:24px">
                         <p style="margin:0;color:#1e40af;font-size:14px">
-                          🎁 <strong>Free Trial:</strong> 50 leads/month. 
-                          Upgrade to Starter ($19/mo) for 1,000 leads, or Team ($49/mo) for 5,000 leads.
+                          🎁 <strong>Free Trial:</strong> 50 leads/month.
+                          Upgrade to Starter ($19/mo) for 1,000 leads.
                         </p>
                       </div>
                       <a href="{FRONTEND_URL}/dashboard"
@@ -173,8 +176,8 @@ async def send_welcome_email(email: str, name: str):
                       </a>
                       <p style="color:#94a3b8;font-size:12px;margin-top:40px;
                                 border-top:1px solid #f1f5f9;padding-top:20px">
-                        LeadRankerAI · Kerala, India · 
-                        <a href="{FRONTEND_URL}/privacy" style="color:#94a3b8">Privacy</a> · 
+                        LeadRankerAI ·
+                        <a href="{FRONTEND_URL}/privacy" style="color:#94a3b8">Privacy</a> ·
                         <a href="{FRONTEND_URL}/terms" style="color:#94a3b8">Terms</a>
                       </p>
                     </div>
@@ -189,6 +192,7 @@ async def send_welcome_email(email: str, name: str):
 
 # ─────────────────────────────────────────────
 # POST /api/v1/auth/register
+# FIXED: generates api_key for every new brokerage
 # ─────────────────────────────────────────────
 @router.post("/register")
 async def register(data: RegisterInput, db: Session = Depends(get_db)):
@@ -200,20 +204,20 @@ async def register(data: RegisterInput, db: Session = Depends(get_db)):
     if exists:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    bid = str(uuid.uuid4())
-    uid = str(uuid.uuid4())
+    bid     = str(uuid.uuid4())
+    uid     = str(uuid.uuid4())
+    api_key = generate_api_key()  # FIXED: always generate api_key
 
     db.execute(text("""
-        INSERT INTO brokerages (id, name, plan, industry)
-        VALUES (:i, :n, 'trial', :ind)
-    """), {"i": bid, "n": data.brokerage_name, "ind": data.industry})
+        INSERT INTO brokerages (id, name, plan, industry, api_key)
+        VALUES (:i, :n, 'trial', :ind, :ak)
+    """), {"i": bid, "n": data.brokerage_name, "ind": data.industry, "ak": api_key})
 
     db.execute(text("""
         INSERT INTO users (id, email, hashed_password, brokerage_id)
         VALUES (:i, :e, :p, :b)
     """), {"i": uid, "e": email, "p": hash_password(data.password), "b": bid})
 
-    # Verification email
     try:
         token = send_verify_email(email)
         db.execute(text("""
@@ -228,8 +232,6 @@ async def register(data: RegisterInput, db: Session = Depends(get_db)):
         logger.warning(f"Verification email failed: {ex}")
 
     db.commit()
-
-    # Welcome email (async, non-blocking)
     await send_welcome_email(email, data.brokerage_name)
 
     return {
@@ -268,12 +270,13 @@ def login(data: LoginInput, db: Session = Depends(get_db)):
 
 
 # ─────────────────────────────────────────────
-# GET /api/v1/auth/me  — also returns profile prefs
+# GET /api/v1/auth/me
+# FIXED: returns api_key + auto-generates if missing
 # ─────────────────────────────────────────────
 @router.get("/me")
 def get_me(user=Depends(get_current_user), db: Session = Depends(get_db)):
     row = db.execute(text("""
-        SELECT b.name AS brokerage_name, b.industry, b.plan,
+        SELECT b.name AS brokerage_name, b.industry, b.plan, b.api_key,
                COALESCE(u.role, 'Manager') AS role,
                COALESCE(u.notification_threshold, 80) AS notification_threshold,
                COALESCE(u.email_alerts, true) AS email_alerts,
@@ -283,6 +286,17 @@ def get_me(user=Depends(get_current_user), db: Session = Depends(get_db)):
         JOIN users u ON u.brokerage_id = b.id
         WHERE LOWER(u.email) = LOWER(:e)
     """), {"e": user["email"]}).fetchone()
+
+    # Auto-fix: generate api_key if missing
+    api_key = row.api_key if row and row.api_key else None
+    if not api_key:
+        api_key = generate_api_key()
+        db.execute(
+            text("UPDATE brokerages SET api_key = :ak WHERE id = :bid"),
+            {"ak": api_key, "bid": user["brokerage_id"]}
+        )
+        db.commit()
+        logger.info(f"Auto-generated api_key for brokerage {user['brokerage_id']}")
 
     return {
         "email":                  user["email"],
@@ -295,11 +309,12 @@ def get_me(user=Depends(get_current_user), db: Session = Depends(get_db)):
         "email_alerts":           row.email_alerts if row else True,
         "hot_lead_only":          row.hot_lead_only if row else False,
         "avatar_url":             row.avatar_url if row else None,
+        "api_key":                api_key,  # FIXED: now returned to frontend
     }
 
 
 # ─────────────────────────────────────────────
-# PATCH /api/v1/auth/me  — save profile changes
+# PATCH /api/v1/auth/me
 # ─────────────────────────────────────────────
 @router.patch("/me")
 def update_me(
@@ -307,7 +322,6 @@ def update_me(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Build dynamic SET clause from only the fields that were sent
     updates = {}
     if data.brokerage_name is not None:
         updates["brokerage_name"] = data.brokerage_name
@@ -355,23 +369,16 @@ def update_me(
 
 
 # ─────────────────────────────────────────────
-# POST /api/v1/auth/avatar  — upload avatar
+# POST /api/v1/auth/avatar
 # ─────────────────────────────────────────────
 @router.post("/avatar")
 async def upload_avatar(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Avatar upload endpoint.
-    In production: accept multipart/form-data, upload to S3/Cloudflare R2,
-    store the public URL in users.avatar_url.
-    For now returns instructions — wire up your storage provider.
-    """
     raise HTTPException(
         status_code=501,
-        detail="Avatar upload requires cloud storage configuration (S3/Cloudflare R2). "
-               "Set STORAGE_PROVIDER env var and implement the upload handler."
+        detail="Avatar upload requires cloud storage (S3/Cloudflare R2). Coming soon."
     )
 
 
@@ -512,7 +519,6 @@ def delete_account(user=Depends(get_current_user), db: Session = Depends(get_db)
     email = user["email"]
     db.execute(text("DELETE FROM lead_scores         WHERE brokerage_id = :b"), {"b": bid})
     db.execute(text("DELETE FROM referrals           WHERE referrer_brokerage_id = :b OR referee_brokerage_id = :b"), {"b": bid})
-    db.execute(text("DELETE FROM webhook_events      WHERE event_id IN (SELECT event_id FROM webhook_events LIMIT 0)"))
     db.execute(text("DELETE FROM email_verifications WHERE LOWER(email) = LOWER(:e)"), {"e": email})
     db.execute(text("DELETE FROM password_resets     WHERE LOWER(email) = LOWER(:e)"), {"e": email})
     db.execute(text("DELETE FROM users               WHERE brokerage_id = :b"), {"b": bid})
@@ -529,15 +535,19 @@ def google_login():
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
     params = {
-        "client_id": GOOGLE_CLIENT_ID, "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code", "scope": "openid email profile",
-        "access_type": "offline", "prompt": "select_account"
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "access_type":   "offline",
+        "prompt":        "select_account"
     }
     return {"auth_url": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)}
 
 
 # ─────────────────────────────────────────────
 # GET /api/v1/auth/google/callback
+# FIXED: generates api_key for Google OAuth new users too
 # ─────────────────────────────────────────────
 @router.get("/google/callback")
 async def google_callback(code: str, db: Session = Depends(get_db)):
@@ -545,10 +555,11 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         token_res = await client.post(
             "https://oauth2.googleapis.com/token",
             data={
-                "code": code, "client_id": GOOGLE_CLIENT_ID,
+                "code":          code,
+                "client_id":     GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code"
+                "redirect_uri":  GOOGLE_REDIRECT_URI,
+                "grant_type":    "authorization_code"
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
@@ -576,15 +587,27 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
     if row:
         brokerage_id = str(row.brokerage_id)
+        # Auto-fix missing api_key for existing Google users
+        existing_key = db.execute(
+            text("SELECT api_key FROM brokerages WHERE id = :bid"),
+            {"bid": brokerage_id}
+        ).fetchone()
+        if not existing_key or not existing_key[0]:
+            db.execute(
+                text("UPDATE brokerages SET api_key = :ak WHERE id = :bid"),
+                {"ak": generate_api_key(), "bid": brokerage_id}
+            )
+            db.commit()
     else:
         brokerage_id = str(uuid.uuid4())
         user_id      = str(uuid.uuid4())
         display_name = user_data.get("name", "Google User")
+        api_key      = generate_api_key()  # FIXED: api_key for Google users
 
         db.execute(text("""
-            INSERT INTO brokerages (id, name, plan, industry)
-            VALUES (:i, :n, 'trial', 'real_estate')
-        """), {"i": brokerage_id, "n": display_name})
+            INSERT INTO brokerages (id, name, plan, industry, api_key)
+            VALUES (:i, :n, 'trial', 'real_estate', :ak)
+        """), {"i": brokerage_id, "n": display_name, "ak": api_key})
 
         db.execute(text("""
             INSERT INTO users (id, email, hashed_password, brokerage_id)
@@ -592,7 +615,6 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         """), {"i": user_id, "e": email,
                "p": hash_password(str(uuid.uuid4())), "b": brokerage_id})
 
-        # Google already verified the email
         db.execute(text("""
             INSERT INTO email_verifications (id, email, token, expires_at, verified)
             VALUES (:i, :e, :t, :x, true)
