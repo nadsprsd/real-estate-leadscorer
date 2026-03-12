@@ -2,7 +2,8 @@ import React, { useState } from "react"
 import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import { Loader2, Mail, Lock, Eye, EyeOff } from "lucide-react"
 import { useAuthStore } from "../store/authStore"
-import ErrorToast from "../components/ErrorToast"
+import { reportError, getFriendlyMessage } from "../lib/errorReporter"
+import ErrorToast, { showErrorToast } from "../components/ErrorToast"
 
 const API_URL = "https://api.leadrankerai.com"
 
@@ -30,6 +31,7 @@ export default function Login() {
         throw new Error("Could not get Google Auth URL")
       }
     } catch (err: any) {
+      await reportError("Google Login", err, "Google Auth Error")
       setError("Google Login failed. Please try again.")
       setGoogleLoading(false)
     }
@@ -46,7 +48,14 @@ export default function Login() {
         body: JSON.stringify(form),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || "Login failed")
+      if (!res.ok) {
+        const err = { status: res.status, message: data.detail || "Login failed" }
+        // Only report if not a simple wrong password (401)
+        if (res.status !== 401) {
+          await reportError("Login", err)
+        }
+        throw new Error(data.detail || "Login failed")
+      }
       setToken(data.access_token)
       navigate("/")
     } catch (err: any) {
@@ -177,7 +186,7 @@ export default function Login() {
           <Link to="/terms" className="hover:underline">Terms</Link>
         </p>
       </div>
-      <ErrorToast /> 
+      <ErrorToast />
     </div>
   )
 }
