@@ -122,8 +122,13 @@ export default function ConnectionsDetail() {
       a.click()
       document.body.removeChild(a)
       window.URL.revokeObjectURL(url)
-    } catch (err: any) {
-      await reportError('Download WordPress Plugin', err, 'Plugin Download Error')
+      
+      } catch (err: any) {
+        await reportError(
+        'Download WordPress Plugin',
+        { message: err?.message || 'Failed to fetch plugin zip' },
+        'Plugin Download Error'
+      )
       showErrorToast('Plugin download failed. Our team has been notified and will fix it shortly.')
     } finally {
       setDownloading(false)
