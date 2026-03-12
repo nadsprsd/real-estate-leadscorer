@@ -1,3 +1,4 @@
+// src/lib/errorReporter.ts
 const API_URL = "https://api.leadrankerai.com"
 
 interface ErrorPayload {
@@ -8,51 +9,85 @@ interface ErrorPayload {
   user_email?: string
 }
 
-// Get current user email from localStorage/token if available
 function getUserEmail(): string | null {
   try {
-    const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token")
+    const token = localStorage.getItem("token") || localStorage.getItem("auth_token")
     if (!token) return null
     const payload = JSON.parse(atob(token.split(".")[1]))
-    return payload.email || payload.sub || null
+    return payload?.email || payload?.sub || null
   } catch {
     return null
   }
 }
 
-// Main reporter function — call this anywhere an error occurs
+function getCurrentPage(): string {
+  return window.location.pathname
+}
+
+function extractMessage(error: any): string {
+  if (typeof error === "string") return error
+  if (error?.message) return error.message
+  if (error?.detail) return error.detail
+  if (error?.error) return error.error
+  return JSON.stringify(error)?.slice(0, 200) || "Unknown error"
+}
+
+// Usage: reportError("action description", errorObject, "Optional Error Type")
 export async function reportError(
-  error_type: string,
   action: string,
-  message: string,
-  user_email?: string
+  error: any,
+  errorType?: string
 ): Promise<void> {
   try {
-    const page = window.location.pathname
-    const email = user_email || getUserEmail() || undefined
+    const payload: ErrorPayload = {
+      error_type: errorType || classifyError(error),
+      page: getCurrentPage(),
+      action,
+      message: extractMessage(error),
+      user_email: getUserEmail() || undefined,
+    }
+
     await fetch(`${API_URL}/api/v1/report-error`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error_type, page, action, message, user_email: email }),
+      body: JSON.stringify(payload),
     })
   } catch {
-    // Silent fail — never block the user for this
+    // Never let error reporting crash the app
   }
 }
 
-// Friendly user-facing messages per error type
-export function getFriendlyMessage(error_type: string): string {
-  const messages: Record<string, string> = {
-    "Plugin Download Failed":     "Plugin download failed. Our team has been notified and will fix this shortly.",
-    "Login Failed":               "Login failed. If this keeps happening, our team has been notified.",
-    "Google Login Failed":        "Google login is temporarily unavailable. Our team has been notified.",
-    "Registration Failed":        "Registration failed. Our team has been notified and will fix this shortly.",
-    "Lead Scoring Failed":        "Lead scoring is temporarily unavailable. Our team has been alerted.",
-    "Billing Error":              "There was a billing issue. Our team has been notified — you won't be charged.",
-    "API Key Error":              "Could not load your API key. Our team has been notified.",
-    "Dashboard Load Failed":      "Dashboard failed to load. Our team has been notified.",
-    "Password Reset Failed":      "Password reset failed. Our team has been notified.",
-    "Default":                    "Something went wrong. Our team has been notified and will fix this shortly.",
+function classifyError(error: any): string {
+  if (!error) return "Unknown Error"
+  const msg = extractMessage(error).toLowerCase()
+  const status = error?.status || error?.statusCode
+  if (status === 500 || msg.includes("500")) return "Server Error (500)"
+  if (status === 401 || msg.includes("unauthorized")) return "Auth Error (401)"
+  if (status === 403 || msg.includes("forbidden")) return "Permission Error (403)"
+  if (status === 404 || msg.includes("404")) return "Not Found (404)"
+  if (msg.includes("failed to fetch") || msg.includes("network")) return "Network Error"
+  if (msg.includes("stripe") || msg.includes("payment")) return "Payment Error"
+  if (msg.includes("google") || msg.includes("oauth")) return "Google Auth Error"
+  if (msg.includes("plugin") || msg.includes("download")) return "Plugin Download Error"
+  return "Application Error"
+}
+
+export function getFriendlyMessage(error: any): string {
+  const type = classifyError(error)
+  switch (type) {
+    case "Server Error (500)":
+      return "Something went wrong on our end. Our team has been notified and will fix it shortly."
+    case "Auth Error (401)":
+      return "Your session has expired. Please sign in again."
+    case "Network Error":
+      return "Connection failed. Please check your internet and try again."
+    case "Payment Error":
+      return "Payment processing failed. Our team has been notified."
+    case "Google Auth Error":
+      return "Google sign-in failed. Please try again or use email/password."
+    case "Plugin Download Error":
+      return "Plugin download failed. Our team has been notified and will fix it shortly."
+    default:
+      return "Something went wrong. Our team has been notified."
   }
-  return messages[error_type] || messages["Default"]
 }
