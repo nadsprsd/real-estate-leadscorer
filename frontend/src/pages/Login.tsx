@@ -2,6 +2,7 @@ import React, { useState } from "react"
 import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import { Loader2, Mail, Lock, Eye, EyeOff } from "lucide-react"
 import { useAuthStore } from "../store/authStore"
+import ErrorToast from "../components/ErrorToast"
 
 const API_URL = "https://api.leadrankerai.com"
 
@@ -176,6 +177,7 @@ export default function Login() {
           <Link to="/terms" className="hover:underline">Terms</Link>
         </p>
       </div>
+      <ErrorToast /> 
     </div>
   )
 }
