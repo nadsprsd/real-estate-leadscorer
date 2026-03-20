@@ -404,29 +404,41 @@ export default function Billing() {
         </section>
 
         {/* Plan Cards — show upgrade options from API */}
-        {usage && usage.upgrade_options && usage.upgrade_options.length > 0 && (
-          <div className="grid md:grid-cols-2 gap-5">
-            {usage.upgrade_options.map((option) => (
-              <PlanCard
-                key={option.plan}
-                plan={option.plan}
-                title={option.label}
-                price={option.amount.split("/")[0]}
-                period="month"
-                tagline={option.plan === "starter" ? "Perfect for solo agents" : "For growing brokerages"}
-                limit={`${option.limit.toLocaleString()} leads/mo`}
-                features={option.plan === "starter"
-                  ? ["1,000 AI lead scores/month", "HOT/WARM/COLD scoring", "WordPress plugin", "Magic email inbound", "Referral program"]
-                  : ["5,000 AI lead scores/month", "Everything in Starter", "Priority processing", "Advanced analytics", "Priority support"]
-                }
-                highlighted={option.plan === "team"}
-                active={usage.plan === option.plan}
-                loading={activeLoader === option.plan}
-                onUpgrade={() => handleUpgrade(option.checkout_url, option.plan)}
-              />
-            ))}
-          </div>
-        )}
+        {usage && (
+  <div className="grid md:grid-cols-2 gap-5">
+    {/* Show current plan card if on starter */}
+    {usage.plan === "starter" && (
+      <PlanCard
+        plan="starter" title="Starter" price="$19" period="month"
+        tagline="Perfect for solo agents" limit="1,000 leads/mo"
+        features={["1,000 AI lead scores/month","HOT/WARM/COLD scoring","WordPress plugin","Magic email inbound","Referral program"]}
+        highlighted={false} active={true}
+        loading={false}
+        onUpgrade={() => {}}
+      />
+    )}
+    {/* Show upgrade options */}
+    {usage.upgrade_options?.map((option) => (
+      <PlanCard
+        key={option.plan}
+        plan={option.plan}
+        title={option.label}
+        price={option.amount.split("/")[0]}
+        period="month"
+        tagline={option.plan === "starter" ? "Perfect for solo agents" : "For growing brokerages"}
+        limit={`${option.limit.toLocaleString()} leads/mo`}
+        features={option.plan === "starter"
+          ? ["1,000 AI lead scores/month","HOT/WARM/COLD scoring","WordPress plugin","Magic email inbound","Referral program"]
+          : ["5,000 AI lead scores/month","Everything in Starter","Priority processing","Advanced analytics","Priority support"]
+        }
+        highlighted={option.plan === "team"}
+        active={usage.plan === option.plan}
+        loading={activeLoader === option.plan}
+        onUpgrade={() => handleUpgrade(option.checkout_url, option.plan)}
+      />
+    ))}
+  </div>
+)}
 
         {isPaid && (
           <div className="text-center">
