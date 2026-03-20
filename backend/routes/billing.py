@@ -219,9 +219,18 @@ async def lemonsqueezy_webhook(
 
     event_name = payload.get("meta", {}).get("event_name", "")
     event_id   = payload.get("meta", {}).get("event_id", "")
-    custom     = payload.get("meta", {}).get("custom_data", {})
-    data       = payload.get("data", {})
-    attrs      = data.get("attributes", {})
+    custom     = payload.get("meta", {}).get("custom_data", {}) or {}
+    data       = payload.get("data", {}) or {}
+    attrs      = data.get("attributes", {}) or {}
+    
+    # Lemon Squeezy sometimes nests custom data differently
+    if not custom:
+        custom = attrs.get("custom_data", {}) or {}
+    if not custom:
+        custom = payload.get("data", {}).get("attributes", {}).get("first_order_item", {})
+    
+    logger.info(f"LS Webhook custom data: {custom}")
+    logger.info(f"LS Webhook attrs keys: {list(attrs.keys())}"  )
 
     logger.info(f"LS Webhook | event={event_name} id={event_id}")
 
@@ -229,11 +238,33 @@ async def lemonsqueezy_webhook(
     if event_id and is_webhook_processed(db, event_id):
         return {"status": "already_processed"}
 
-    brokerage_id    = custom.get("brokerage_id")
-    plan            = custom.get("plan")
-    customer_email  = attrs.get("user_email") or attrs.get("customer_email")
+    # Get email from attrs
+    customer_email  = attrs.get("user_email") or attrs.get("user_name") or ""
     ls_customer_id  = str(attrs.get("customer_id", ""))
     ls_sub_id       = str(data.get("id", ""))
+
+    # Match plan by product_id from first_order_item or custom data
+    first_item      = attrs.get("first_order_item") or custom or {}
+    product_id      = str(first_item.get("product_id", ""))
+    
+    # Map product IDs to plans
+    PRODUCT_PLAN_MAP = {
+        "906586": "starter",
+        "906594": "team",
+    }
+    
+    # Get brokerage_id and plan
+    brokerage_id    = custom.get("brokerage_id")
+    plan            = custom.get("plan") or PRODUCT_PLAN_MAP.get(product_id)
+    
+    # If no brokerage_id in custom data, look up by email
+    if not brokerage_id and customer_email:
+        from sqlalchemy import text as _text
+        row = db.execute(_text("SELECT b.id FROM brokerages b JOIN users u ON u.brokerage_id = b.id WHERE LOWER(u.email) = LOWER(:email) LIMIT 1"), {"email": customer_email}).fetchone()
+        if row:
+            brokerage_id = str(row[0])
+    
+    logger.info(f"LS Webhook resolved | email={customer_email} plan={plan} brokerage={brokerage_id} product={product_id}")
 
     # ── Handle events ─────────────────────────
     if event_name in ("order_created", "subscription_created"):
@@ -241,9 +272,31 @@ async def lemonsqueezy_webhook(
             rows = db_update_plan(db, brokerage_id, plan, ls_customer_id, ls_sub_id)
             logger.info(f"Plan activated | brokerage={brokerage_id} plan={plan} rows={rows}")
 
-            # Send confirmation email
+            # Send confirmation to buyer
             if customer_email:
                 await send_upgrade_confirmation(customer_email, plan)
+            
+            # Notify founder of new purchase
+            import httpx as _httpx, datetime as _dt
+            try:
+                async with _httpx.AsyncClient() as _client:
+                    await _client.post(
+                        "https://api.resend.com/emails",
+                        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                        json={
+                            "from": "LeadRankerAI Alerts <notifications@leadrankerai.com>",
+                            "to": ["nandprsd62@gmail.com"],
+                            "html": f"""<div style='font-family:sans-serif;padding:24px'>
+                                <p><b>Email:</b> {customer_email}</p>
+                                <p><b>Plan:</b> {plan.title()}</p>
+                                <p><b>Brokerage ID:</b> {brokerage_id}</p>
+                                <p><b>Time:</b> {_dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
+                            </div>"""
+                        },
+                        timeout=10
+                    )
+            except Exception as _e:
+                logger.error(f"Founder notification failed: {_e}")
 
             # Check referral
             if customer_email:
@@ -464,3 +517,13 @@ async def submit_referral(
         logger.error(f"Referral email failed: {e}")
 
     return {"status": "sent", "referee_email": referee_email}
+
+# ─────────────────────────────────────────────
+# GET /usage — alias for status
+# ─────────────────────────────────────────────
+@router.get("/usage")
+async def billing_usage(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return await billing_status(db=db, user=user)
