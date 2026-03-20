@@ -124,7 +124,7 @@ app.include_router(pixel_router)
 
 # ─────────────────────────────────────────────
 # MIDDLEWARE — body size limit
-# OPTIONS must always pass through untouched
+
 # ─────────────────────────────────────────────
 @app.middleware("http")
 async def limit_body_size(request: Request, call_next):
