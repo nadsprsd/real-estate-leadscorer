@@ -6,9 +6,14 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from pydantic import BaseModel
@@ -21,7 +26,7 @@ import httpx
 from backend.routes.auth    import router as auth_router, get_current_user
 from backend.routes.leads   import router as leads_router
 from backend.routes.billing import router as billing_router
-from backend.routes.pixel   import router as pixel_router
+from backend.routes.pixel_route import router as pixel_router
 
 from backend.db import get_db
 from backend.models import LeadScore
@@ -31,6 +36,7 @@ from backend.services.alerts    import send_hot_alert
 load_dotenv()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
@@ -97,11 +103,48 @@ def custom_openapi():
     return schema
 
 
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 app = FastAPI(
     title="LeadRankerAI SaaS",
     description="AI-powered lead scoring for real estate brokerages",
     version="1.0.0",
 )
+# ── GLOBAL RATE LIMITER (OUTERMOST LAYER) ──
+from collections import defaultdict
+import time
+from fastapi.responses import JSONResponse
+
+request_counts = defaultdict(list)
+RATE_LIMITS = {
+    "/leads/score": (20, 60),
+    "/api/v1/ranky/chat": (15, 60),
+    "/inbound/": (30, 60)
+}
+
+@app.middleware("http")
+async def ip_rate_limit_middleware(request: Request, call_next):
+    ip = request.client.host if request.client else "unknown"
+    path = request.url.path
+    now = time.time()
+    
+    for route, (limit, window) in RATE_LIMITS.items():
+        if path.startswith(route):
+            key = f"{ip}:{path}"
+            request_counts[key] = [t for t in request_counts[key] if now - t < window]
+            if len(request_counts[key]) >= limit:
+                return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+            request_counts[key].append(now)
+            break
+    return await call_next(request)
+
+
+# Rate limiting middleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+app.mount("/static", StaticFiles(directory="/home/ubuntu/leadrankerai/static"), name="static")
 app.openapi = custom_openapi
 
 # ── CORS middleware — MUST be added before routers ─────────────────────────
@@ -124,7 +167,7 @@ app.include_router(pixel_router)
 
 # ─────────────────────────────────────────────
 # MIDDLEWARE — body size limit
-
+# OPTIONS must always pass through untouched
 # ─────────────────────────────────────────────
 @app.middleware("http")
 async def limit_body_size(request: Request, call_next):
@@ -256,7 +299,9 @@ def save_lead(db, brokerage_id, user_email, payload, ai):
 # POST /leads/score
 # ─────────────────────────────────────────────
 @app.post("/leads/score")
+@limiter.limit("20/minute")
 def score_lead(
+    request: Request,
     lead: LeadInput,
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -318,6 +363,7 @@ async def fetch_full_email(email_id: str):
 
 
 @app.post("/inbound/email")
+@limiter.limit("30/minute")
 async def inbound_email(request: Request, db: Session = Depends(get_db)):
     try:
         payload    = await request.json()
@@ -368,7 +414,9 @@ async def inbound_email(request: Request, db: Session = Depends(get_db)):
 # POST /inbound/{brokerage_id}
 # ─────────────────────────────────────────────
 @app.post("/inbound/{brokerage_id}")
+@limiter.limit("30/minute")
 async def inbound_webhook(
+    request: Request,
     brokerage_id: str,
     lead: LeadInput,
     db: Session = Depends(get_db)
@@ -516,3 +564,89 @@ def billing_status_route(
 @app.get("/health")
 def health():
     return {"status": "ok", "env": os.getenv("ENV", "development")}
+# ─────────────────────────────────────────────
+# ERROR REPORTING ENDPOINT
+# ─────────────────────────────────────────────
+class ErrorReport(BaseModel):
+    error_type: str
+    page: str
+    action: str
+    message: str
+    user_email: str = None
+
+@app.post("/api/v1/report-error")
+@limiter.limit("10/minute")
+async def report_error(request: Request):
+    report = request
+    body = await report.json()
+    logger.info(f"report-error body: {body}")
+    report = ErrorReport(**body)
+    import httpx, datetime
+    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "from": "LeadRankerAI Alerts <notifications@leadrankerai.com>",
+                    "to": ["nandprsd62@gmail.com"],
+                    "subject": f"🚨 {report.error_type} — {report.page}",
+                    "html": f"""<div style='font-family:sans-serif;padding:24px;max-width:600px'>
+                        <h2 style='color:#dc2626'>🚨 User Error Report</h2>
+                        <p><b>User:</b> {report.user_email or 'Not logged in'}</p>
+                        <p><b>Error Type:</b> <span style='color:#dc2626'>{report.error_type}</span></p>
+                        <p><b>Page:</b> {report.page}</p>
+                        <p><b>Action:</b> {report.action}</p>
+                        <p><b>Message:</b> {report.message}</p>
+                        <p><b>Time:</b> {timestamp}</p>
+                        <hr/>
+                        <p style='color:#64748b;font-size:13px'>Reply to user: <a href='mailto:{report.user_email}'>{report.user_email or 'unknown'}</a></p>
+                    </div>"""
+                },
+                timeout=10
+            )
+    except Exception as e:
+        logger.error(f"Error report email failed: {e}")
+    return {"ok": True}
+
+# ─────────────────────────────────────────────
+# RANKY AI ASSISTANT ENDPOINT
+# ─────────────────────────────────────────────
+class RankyMessage(BaseModel):
+    message: str
+    language: str = "english"
+    history: list = []
+
+@app.post("/api/v1/ranky/chat")
+@limiter.limit("15/minute")
+async def ranky_chat(request: Request, payload: RankyMessage, user=Depends(get_current_user)):
+    import httpx
+    system_prompts = {
+        "english":   "You are Ranky, a friendly AI assistant for LeadRankerAI. Help users understand lead scoring, connections, billing, and features. Be concise and helpful.",
+        "hindi":     "आप Ranky हैं, LeadRankerAI के लिए एक मित्रवत AI सहायक। संक्षिप्त रहें।",
+        "malayalam": "നിങ്ങൾ Ranky ആണ്, LeadRankerAI-ന്റെ AI അസിസ്റ്റന്റ്.",
+        "arabic":    "أنت Ranky، مساعد ذكاء اصطناعي لـ LeadRankerAI.",
+        "spanish":   "Eres Ranky, asistente de IA para LeadRankerAI.",
+        "tamil":     "நீங்கள் Ranky, LeadRankerAI-ன் AI உதவியாளர்.",
+    }
+    lang = payload.language.lower()
+    system = system_prompts.get(lang, system_prompts["english"])
+    messages = [{"role": "system", "content": system}]
+    for h in payload.history[-6:]:
+        messages.append(h)
+    messages.append({"role": "user", "content": payload.message})
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": messages, "max_tokens": 300, "temperature": 0.7},
+                timeout=30
+            )
+            data = res.json()
+            reply = data["choices"][0]["message"]["content"]
+            return {"reply": reply}
+    except Exception as e:
+        logger.error(f"Ranky error: {e}")
+        raise HTTPException(status_code=500, detail="Ranky is unavailable right now")
