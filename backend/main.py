@@ -622,13 +622,20 @@ class RankyMessage(BaseModel):
 @limiter.limit("15/minute")
 async def ranky_chat(request: Request, payload: RankyMessage, user=Depends(get_current_user)):
     import httpx
+    RANKY_BASE = """You are Ranky, the friendly AI assistant built into LeadRankerAI.
+LeadRankerAI is a lead scoring tool that scores inbound leads as HOT, WARM, or COLD in under 3 seconds.
+You help users with: lead scoring, connecting integrations (WordPress, Meta Ads, Google Ads), billing, dashboard features, API keys, and troubleshooting.
+Always be concise, friendly, and helpful. Never make up features that do not exist.
+If asked about pricing: Starter is 19 USD/month for 1000 leads. Team is 49 USD/month for 5000 leads. Free trial is 50 leads.
+"""
+
     system_prompts = {
-        "english":   "You are Ranky, a friendly AI assistant for LeadRankerAI. Help users understand lead scoring, connections, billing, and features. Be concise and helpful.",
-        "hindi":     "आप Ranky हैं, LeadRankerAI के लिए एक मित्रवत AI सहायक। संक्षिप्त रहें।",
-        "malayalam": "നിങ്ങൾ Ranky ആണ്, LeadRankerAI-ന്റെ AI അസിസ്റ്റന്റ്.",
-        "arabic":    "أنت Ranky، مساعد ذكاء اصطناعي لـ LeadRankerAI.",
-        "spanish":   "Eres Ranky, asistente de IA para LeadRankerAI.",
-        "tamil":     "நீங்கள் Ranky, LeadRankerAI-ன் AI உதவியாளர்.",
+        "english":   RANKY_BASE + "Always respond in English.",
+        "hindi":     RANKY_BASE + "हमेशा हिंदी में जवाब दें। पूरी जानकारी हिंदी में दें।",
+        "malayalam": RANKY_BASE + "എല്ലായ്പ്പോഴും മലയാളത്തിൽ മറുപടി നൽകുക. എല്ലാ വിവരങ്ങളും മലയാളത്തിൽ നൽകുക.",
+        "arabic":    RANKY_BASE + "أجب دائماً باللغة العربية. قدم جميع المعلومات باللغة العربية.",
+        "spanish":   RANKY_BASE + "Responde siempre en español. Da toda la información en español.",
+        "tamil":     RANKY_BASE + "எப்போதும் தமிழில் பதில் அளிக்கவும். அனைத்து தகவல்களையும் தமிழில் வழங்கவும்.",
     }
     lang = payload.language.lower()
     system = system_prompts.get(lang, system_prompts["english"])
@@ -650,3 +657,72 @@ async def ranky_chat(request: Request, payload: RankyMessage, user=Depends(get_c
     except Exception as e:
         logger.error(f"Ranky error: {e}")
         raise HTTPException(status_code=500, detail="Ranky is unavailable right now")
+
+# ─────────────────────────────────────────────
+# CHANGELOG ENDPOINT
+# ─────────────────────────────────────────────
+CHANGELOG = [
+    {
+        "version": "1.3.1",
+        "date": "2026-03-31",
+        "title": "Ranky speaks your language",
+        "badge": "improvement",
+        "items": [
+            "Ranky AI assistant now responds fully in Hindi, Malayalam, Tamil, Arabic and Spanish",
+            "Smarter onboarding guidance in your preferred language",
+            "LeadRankerAI context added — Ranky now knows your plan, pricing and features",
+        ]
+    },
+    {
+        "version": "1.3.0",
+        "date": "2026-03-21",
+        "title": "Smarter Lead Scoring",
+        "badge": "improvement",
+        "items": [
+            "AI scoring now uses industry-specific examples for better accuracy",
+            "Rule-based signals: phone number, budget, timeline detection",
+            "Spam and low-quality messages automatically scored 0",
+            "Prompt injection protection added",
+        ]
+    },
+    {
+        "version": "1.2.0",
+        "date": "2026-03-20",
+        "title": "Billing & Payments",
+        "badge": "new",
+        "items": [
+            "Lemon Squeezy payment integration launched",
+            "Automatic plan upgrade after payment",
+            "Welcome email sent after subscription",
+            "Usage tracking per billing cycle",
+        ]
+    },
+    {
+        "version": "1.1.0",
+        "date": "2026-03-15",
+        "title": "Security Hardening",
+        "badge": "security",
+        "items": [
+            "Rate limiting on all API endpoints",
+            "Error monitoring with founder alerts",
+        ]
+    },
+    {
+        "version": "1.0.0",
+        "date": "2026-03-01",
+        "title": "Alpha Launch",
+        "badge": "launch",
+        "items": [
+            "AI lead scoring (HOT/WARM/COLD) across 7 industries",
+            "WordPress plugin for form interception",
+            "Magic email inbound scoring",
+            "Ranky AI assistant in 6 languages",
+            "Google OAuth + email auth",
+            "Referral program",
+        ]
+    },
+]
+
+@app.get("/api/v1/changelog")
+async def get_changelog():
+    return {"changelog": CHANGELOG, "latest_version": CHANGELOG[0]["version"]}
