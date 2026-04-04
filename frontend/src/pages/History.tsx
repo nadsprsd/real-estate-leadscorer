@@ -89,7 +89,7 @@ export default function History() {
         <h1 style={{ fontSize: 28, fontWeight: 900, color: '#f1f5f9', margin: 0 }}>
           Lead Center
         </h1>
-        <p style={{ color: '#64748b', fontSize: 13, marginTop: 4 }}>
+        <p style={{ color: '#f1f5f9', fontSize: 13, marginTop: 4 }}>
           Track, act, and mark conversions to improve AI accuracy
         </p>
       </div>
