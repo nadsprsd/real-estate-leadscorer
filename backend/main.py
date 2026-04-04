@@ -20,7 +20,6 @@ from pydantic import BaseModel
 from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 
-import stripe
 import httpx
 
 from backend.routes.auth    import router as auth_router, get_current_user
@@ -35,7 +34,6 @@ from backend.services.alerts    import send_hot_alert
 
 load_dotenv()
 
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
@@ -561,7 +559,7 @@ def billing_status_route(
 # ─────────────────────────────────────────────
 # GET /health
 # ─────────────────────────────────────────────
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok", "env": os.getenv("ENV", "development")}
 # ─────────────────────────────────────────────
@@ -577,11 +575,13 @@ class ErrorReport(BaseModel):
 @app.post("/api/v1/report-error")
 @limiter.limit("10/minute")
 async def report_error(request: Request):
-    report = request
-    body = await report.json()
-    logger.info(f"report-error body: {body}")
-    report = ErrorReport(**body)
-    import httpx, datetime
+    try:
+        body = await request.json()
+        report = ErrorReport(**body)
+    except Exception as e:
+        logger.error(f"report-error parse failed: {e}")
+        return {"ok": True}
+    import datetime
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     try:
         async with httpx.AsyncClient() as client:
