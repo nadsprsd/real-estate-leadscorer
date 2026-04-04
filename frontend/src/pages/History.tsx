@@ -168,10 +168,10 @@ export default function History() {
               {/* Header */}
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
                 <div>
-                  <h3 style={{ fontSize: 18, fontWeight: 700, color: '#38bdf8', margin: 0 }}>
+                  <h3 style={{ fontSize: 20, fontWeight: 800, color: '#e2e8f0', margin: 0 }}>
                     {lead.name || "Unknown"}
                   </h3>
-                  <p style={{ fontSize: 12, color: '#64748b', margin: '2px 0 0' }}>
+                  <p style={{ fontSize: 13, color: '#94a3b8', margin: '2px 0 0' }}>
                     {lead.email || "No Email"}
                   </p>
                 </div>
