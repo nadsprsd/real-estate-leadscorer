@@ -126,12 +126,20 @@ async def ip_rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     now = time.time()
     
+    # Clean up old keys to prevent memory leak
+    if len(request_counts) > 10000:
+        cutoff = now - 120
+        keys_to_delete = [k for k, v in request_counts.items() if not v or max(v) < cutoff]
+        for k in keys_to_delete:
+            del request_counts[k]
+    
     for route, (limit, window) in RATE_LIMITS.items():
         if path.startswith(route):
             key = f"{ip}:{path}"
             request_counts[key] = [t for t in request_counts[key] if now - t < window]
             if len(request_counts[key]) >= limit:
-                return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+                logger.warning(f"Rate limit hit: {ip} on {path}")
+                return JSONResponse(status_code=429, content={"detail": f"Too many requests. Max {limit} per minute."})
             request_counts[key].append(now)
             break
     return await call_next(request)
@@ -726,3 +734,50 @@ CHANGELOG = [
 @app.get("/api/v1/changelog")
 async def get_changelog():
     return {"changelog": CHANGELOG, "latest_version": CHANGELOG[0]["version"]}
+
+# ─────────────────────────────────────────────
+# POST /leads/{lead_id}/conversion
+# ─────────────────────────────────────────────
+class ConversionInput(BaseModel):
+    converted: bool
+
+@app.post("/leads/{lead_id}/conversion")
+def mark_conversion(
+    lead_id: str,
+    data: ConversionInput,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    db.execute(text("""
+        UPDATE lead_scores 
+        SET input_payload = input_payload || jsonb_build_object('converted', :converted)
+        WHERE id = :lid AND brokerage_id = :bid
+    """), {"converted": data.converted, "lid": lead_id, "bid": user["brokerage_id"]})
+    db.commit()
+    return {"ok": True}
+
+# ─────────────────────────────────────────────
+# POST /leads/{lead_id}/conversion
+# ─────────────────────────────────────────────
+class ConversionInput(BaseModel):
+    converted: bool
+
+@app.post("/leads/{lead_id}/conversion")
+def mark_conversion(
+    lead_id: str,
+    data: ConversionInput,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        db.execute(text("""
+            UPDATE lead_scores 
+            SET input_payload = input_payload || jsonb_build_object('converted', :converted::text)
+            WHERE id = :lid AND brokerage_id = :bid
+        """), {"converted": data.converted, "lid": lead_id, "bid": user["brokerage_id"]})
+        db.commit()
+        logger.info(f"Conversion marked: lead={lead_id} converted={data.converted}")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Conversion mark failed: {e}")
+        return {"ok": False}
