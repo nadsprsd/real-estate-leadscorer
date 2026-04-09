@@ -304,7 +304,7 @@ export default function History() {
 
               {/* Timestamp */}
               <div style={{ textAlign: 'right', marginTop: 8, fontSize: 10, color: '#374151' }}>
-                {lead.created_at ? new Date(lead.created_at).toLocaleString('en-IN') : ""}
+               {lead.created_at ? new Date(lead.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }) : ""}
               </div>
             </div>
           ))

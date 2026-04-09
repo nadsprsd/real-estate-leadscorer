@@ -109,10 +109,11 @@ export default function Dashboard() {
               </div>
 
               <div className="text-right mt-4 opacity-30 text-[10px]">
-                {new Date(lead.created_at).toLocaleString("en-IN", {
-                  day: "numeric", month: "short", year: "numeric",
-                  hour: "numeric", minute: "2-digit", hour12: true,
-                })}
+               {new Date(lead.created_at).toLocaleString("en-IN", {
+               timeZone: "Asia/Kolkata",
+               day: "numeric", month: "short", year: "numeric",
+               hour: "numeric", minute: "2-digit", hour12: true,
+               })}
               </div>
             </div>
           ))}
