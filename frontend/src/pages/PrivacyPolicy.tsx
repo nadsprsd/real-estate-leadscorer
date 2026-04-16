@@ -38,7 +38,7 @@ export default function PrivacyPolicy() {
               </div>
               <div className="bg-slate-50 rounded-xl p-4">
                 <p className="font-bold text-slate-800 mb-2">Payment Data</p>
-                <p className="text-slate-600">Processed entirely by Stripe. We store only your Stripe Customer ID and subscription plan — never card numbers, CVV, or billing address.</p>
+               <p className="text-slate-600">Processed entirely by Razorpay (India). We store only your payment reference ID and subscription plan - never card numbers, CVV, or billing address.</p>
               </div>
             </div>
           </section>
@@ -72,7 +72,7 @@ export default function PrivacyPolicy() {
             <h3 className="font-black text-slate-900 text-lg mb-3">4. Third Parties</h3>
             <div className="text-sm space-y-2">
               {[
-                { name: "Stripe", purpose: "Payment processing", location: "USA", policy: "https://stripe.com/privacy" },
+                { name: "Razorpay", purpose: "Payment processing (India)", location: "India", policy: "https://razorpay.com/privacy" },
                 { name: "Resend", purpose: "Transactional email delivery", location: "USA", policy: "https://resend.com/privacy" },
                 { name: "LLM (OpenAI GPT-4o mini and GPT-3.5 Turbo)", purpose: "AI lead scoring", location: "USA", policy: "https://openai.com/privacy" },
                 { name: "AWS", purpose: "Cloud infrastructure", location: "Singapore/India", policy: "https://aws.amazon.com/privacy" },

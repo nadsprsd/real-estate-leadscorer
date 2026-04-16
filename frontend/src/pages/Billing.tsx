@@ -526,7 +526,7 @@ export default function Billing() {
             <div className="px-6 pb-6 border-t border-slate-100 pt-5">
               <div className="grid md:grid-cols-2 gap-4">
                 {[
-                  { icon: <Lock size={16} className="text-green-600" />, title: "Payments via Lemon Squeezy", desc: "We never store card details. All payments processed securely by Lemon Squeezy." },
+                  { icon: <Lock size={16} className="text-green-600" />, title: "Payments secured by Razorpay", desc: "We never store card details. All payments processed securely by Razorpay — India's most trusted payment gateway." },
                   { icon: <Shield size={16} className="text-blue-600" />, title: "End-to-end encryption", desc: "TLS 1.3 in transit. Data encrypted at rest. Only you can access your data." },
                   { icon: <Bell size={16} className="text-purple-600" />, title: "Proactive usage alerts", desc: "You'll be notified when approaching your monthly limit." },
                   { icon: <BadgeCheck size={16} className="text-amber-600" />, title: "Your data is yours", desc: "We never sell, share, or use your lead data for advertising." },

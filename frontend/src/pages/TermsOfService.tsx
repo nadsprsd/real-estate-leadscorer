@@ -43,8 +43,8 @@ export default function TermsOfService() {
               <p>Billing is monthly and auto-renewed. You may cancel any time from the Billing page. 
                 Cancellation takes effect at the end of the current billing period. <strong>No refunds</strong> are 
                 issued for partial months, unused credits, or early cancellation.</p>
-              <p>Payments are processed securely by <strong>Stripe</strong>. We do not store card details. 
-                GST is applicable for Indian clients as per statutory regulations.</p>
+
+            <p>Payments are processed securely by <strong>Razorpay</strong> (India).We do not store card details.</p>
             </div>
           </section>
 
