@@ -57,12 +57,12 @@ const PLAN_CONFIG: Record<string, {
     icon: <TrendingUp size={22} className="text-slate-500" />,
   },
   starter: {
-    label: "Starter", tagline: "$19/mo · 1,000 leads/mo",
+    label: "Starter", tagline: "₹1,900/mo · 1,000 leads/mo",
     color: "text-blue-700", bg: "bg-blue-50", border: "border-blue-300",
     icon: <Zap size={22} className="text-blue-600" />,
   },
   team: {
-    label: "Team", tagline: "$49/mo · 5,000 leads/mo",
+    label: "Team", tagline: "₹4,900/mo · 5,000 leads/mo",
     color: "text-indigo-700", bg: "bg-indigo-50", border: "border-indigo-300",
     icon: <Crown size={22} className="text-indigo-600" />,
   },
@@ -465,9 +465,9 @@ export default function Billing() {
   <div className="grid md:grid-cols-2 gap-5">
     {/* Show current plan card if on starter */}
     {usage.plan === "starter" && (
-      <PlanCard
-        plan="starter" title="Starter" price="$19" period="month"
-        tagline="Perfect for solo agents" limit="1,000 leads/mo"
+     <PlanCard
+     plan="starter" title="Starter" price="₹1,900" period="month"
+     tagline="Perfect for solo agents" limit="1,000 leads/mo"
         features={["1,000 AI lead scores/month","HOT/WARM/COLD scoring","WordPress plugin","Magic email inbound","Referral program"]}
         highlighted={false} active={true}
         loading={false}
@@ -480,7 +480,7 @@ export default function Billing() {
         key={option.plan}
         plan={option.plan}
         title={option.label}
-        price={option.amount.split("/")[0]}
+        price={option.amount.split("/mo")[0]}
         period="month"
         tagline={option.plan === "starter" ? "Perfect for solo agents" : "For growing brokerages"}
         limit={`${option.limit.toLocaleString()} leads/mo`}
