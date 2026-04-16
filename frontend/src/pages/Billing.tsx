@@ -133,17 +133,74 @@ export default function Billing() {
     fetchReferrals();
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleUpgrade = async (checkoutUrl: string, plan: string) => {
-    if (activeLoader) return;
-    setActiveLoader(plan);
-    try {
-      // Direct redirect to Lemon Squeezy checkout
-      window.location.href = checkoutUrl;
-    } catch (err: any) {
-      showToast("error", `❌ ${err?.message || "Checkout failed"}`);
-      setActiveLoader(null);
+  const handleUpgrade = async (plan: string) => {
+  if (activeLoader) return;
+  setActiveLoader(plan);
+  try {
+    // Create Razorpay order
+    const res = await api.post("/api/v1/billing/checkout", {
+      plan,
+      payment_method: "razorpay"
+    });
+
+    if (res.method === "razorpay") {
+      // Load Razorpay script dynamically
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+      document.body.appendChild(script);
+
+      script.onload = () => {
+        const options = {
+          key:         res.key_id,
+          amount:      res.amount,
+          currency:    "INR",
+          name:        "LeadRankerAI",
+          description: `${res.plan_label} Plan — ${res.amount_display}`,
+          order_id:    res.order_id,
+          prefill: {
+            email: res.email,
+          },
+          theme: { color: "#0ea5e9" },
+          handler: async (response: any) => {
+            try {
+              // Verify payment on backend
+              const verify = await api.post("/api/v1/billing/verify-payment", {
+                razorpay_order_id:   response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature:  response.razorpay_signature,
+                plan:                plan,
+                brokerage_id:        res.brokerage_id,
+              });
+              showToast("success", `🎉 ${verify.message}`);
+              await fetchUsage();
+              setTimeout(() => navigate("/dashboard"), 2000);
+            } catch (err: any) {
+              showToast("error", "Payment verification failed. Contact support.");
+            }
+          },
+          modal: {
+            ondismiss: () => {
+              showToast("warning", "Payment cancelled.");
+              setActiveLoader(null);
+            }
+          }
+        };
+        const rzp = new (window as any).Razorpay(options);
+        rzp.open();
+        setActiveLoader(null);
+      };
+
+    } else {
+      // International — redirect to Lemon Squeezy
+      window.location.href = res.checkout_url;
     }
-  };
+
+  } catch (err: any) {
+    showToast("error", `❌ ${err?.message || "Checkout failed"}`);
+    setActiveLoader(null);
+  }
+};
 
   const handleReferralSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -414,7 +471,7 @@ export default function Billing() {
         features={["1,000 AI lead scores/month","HOT/WARM/COLD scoring","WordPress plugin","Magic email inbound","Referral program"]}
         highlighted={false} active={true}
         loading={false}
-        onUpgrade={() => {}}
+        onUpgrade={() => handleUpgrade("starter")}
       />
     )}
     {/* Show upgrade options */}
@@ -434,7 +491,7 @@ export default function Billing() {
         highlighted={option.plan === "team"}
         active={usage.plan === option.plan}
         loading={activeLoader === option.plan}
-        onUpgrade={() => handleUpgrade(option.checkout_url, option.plan)}
+        onUpgrade={() => handleUpgrade(option.plan)}
       />
     ))}
   </div>
