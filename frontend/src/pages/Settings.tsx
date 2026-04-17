@@ -63,19 +63,16 @@ export default function Settings() {
 
   const [toast, setToast] = useState<Toast | null>(null)
 
-  // ── Auth header helper ─────────────────────
   const authHeaders = useCallback(() => ({
     "Content-Type": "application/json",
     "Authorization": `Bearer ${token || localStorage.getItem("token") || ""}`
   }), [token])
 
-  // ── Toast ──────────────────────────────────
   const showToast = useCallback((type: Toast["type"], message: string) => {
     setToast({ type, message })
     setTimeout(() => setToast(null), 5000)
   }, [])
 
-  // ── Load profile ───────────────────────────
   useEffect(() => {
     if (!token) { navigate("/login"); return }
 
@@ -100,7 +97,6 @@ export default function Settings() {
             avatar_url:             d.avatar_url    || null,
           })
         } else if (profileRes.status === "fulfilled" && profileRes.value.status === 401) {
-          // Token expired — force re-login
           logout(); navigate("/login"); return
         }
 
@@ -117,7 +113,6 @@ export default function Settings() {
     load()
   }, [token]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Save profile ───────────────────────────
   const handleSave = async () => {
     setSaving(true)
     try {
@@ -140,7 +135,7 @@ export default function Settings() {
         throw new Error(d?.detail || "Save failed")
       }
 
-      showToast("success", "✅ Profile saved successfully")
+      showToast("success", "Profile saved successfully")
     } catch (err: any) {
       showToast("error", err?.message || "Failed to save profile")
     } finally {
@@ -148,12 +143,10 @@ export default function Settings() {
     }
   }
 
-  // ── Avatar upload ──────────────────────────
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Validate
     if (!file.type.startsWith("image/")) {
       showToast("error", "Please select an image file (PNG, JPG, WebP)")
       return
@@ -165,16 +158,12 @@ export default function Settings() {
 
     setAvatarUploading(true)
     try {
-      // Show local preview immediately
       const reader = new FileReader()
       reader.onload = (ev) => {
         setProfile(p => ({ ...p, avatar_url: ev.target?.result as string }))
       }
       reader.readAsDataURL(file)
 
-      // Upload to backend
-      // Backend /api/v1/auth/avatar currently returns 501 until you configure cloud storage.
-      // The local preview still works — avatar_url is just stored locally until backend is wired.
       const formData = new FormData()
       formData.append("file", file)
 
@@ -185,7 +174,6 @@ export default function Settings() {
       })
 
       if (res.status === 501) {
-        // Expected until cloud storage is configured — preview still shows
         showToast("warning", "Avatar preview saved locally. Cloud storage not configured yet.")
         return
       }
@@ -193,7 +181,7 @@ export default function Settings() {
 
       const d = await res.json()
       if (d.avatar_url) setProfile(p => ({ ...p, avatar_url: d.avatar_url }))
-      showToast("success", "✅ Avatar updated!")
+      showToast("success", "Avatar updated!")
 
     } catch (err: any) {
       if (!err?.message?.includes("501")) {
@@ -204,7 +192,6 @@ export default function Settings() {
     }
   }
 
-  // ── Change password ────────────────────────
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault()
     if (pwForm.next !== pwForm.confirm) {
@@ -224,7 +211,7 @@ export default function Settings() {
       })
       const d = await res.json()
       if (!res.ok) throw new Error(d?.detail || "Failed")
-      showToast("success", "✅ Password updated!")
+      showToast("success", "Password updated!")
       setPwForm({ current: "", next: "", confirm: "" })
       setShowPassword(false)
     } catch (err: any) {
@@ -234,7 +221,6 @@ export default function Settings() {
     }
   }
 
-  // ── Delete account ─────────────────────────
   const handleDelete = async () => {
     if (deleteConfirm !== "DELETE") {
       showToast("error", 'You must type "DELETE" exactly to confirm')
@@ -308,7 +294,7 @@ export default function Settings() {
           </button>
         </div>
 
-        {/* ═══ PAGE 6: USER & TEAM PROFILE ══════ */}
+        {/* Profile Section */}
         <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="flex items-center gap-3 p-6 border-b border-slate-100">
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
@@ -334,7 +320,6 @@ export default function Settings() {
                     {avatarInitials}
                   </div>
                 )}
-                {/* Hidden file input */}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -348,7 +333,6 @@ export default function Settings() {
                   className="absolute -bottom-2 -right-2 w-8 h-8 bg-white border-2 border-slate-200
                     rounded-xl flex items-center justify-center hover:bg-blue-50 transition-all
                     shadow-sm disabled:opacity-60"
-                  title="Upload avatar"
                 >
                   {avatarUploading
                     ? <Loader2 size={13} className="animate-spin text-blue-600" />
@@ -429,13 +413,12 @@ export default function Settings() {
               </div>
             </div>
 
-            {/* Security & Preferences */}
+            {/* Notifications */}
             <div className="pt-2 border-t border-slate-100 space-y-4">
               <h3 className="font-bold text-slate-700 text-sm flex items-center gap-2">
                 <Shield size={15} className="text-slate-500" /> Notifications & Security
               </h3>
 
-              {/* Note about biometric */}
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-700 flex gap-2">
                 <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
                 <span>
@@ -455,7 +438,7 @@ export default function Settings() {
                   key: "hot_lead_only" as const,
                   icon: <span className="text-base">🔥</span>,
                   title: "HOT Leads Only",
-                  desc: "Only send alerts when a lead is scored HOT (≥80)"
+                  desc: "Only send alerts when a lead is scored HOT (80+)"
                 },
               ].map(({ key, icon, title, desc }) => (
                 <div key={key} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
@@ -478,7 +461,6 @@ export default function Settings() {
                 </div>
               ))}
 
-              {/* Score threshold */}
               <div className="p-4 bg-slate-50 rounded-2xl space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -504,9 +486,8 @@ export default function Settings() {
                 </div>
               </div>
 
-              {/* Remember to save */}
               <p className="text-xs text-slate-400 text-center">
-                ↑ Click <strong>Save Changes</strong> at the top to apply these settings
+                Click <strong>Save Changes</strong> at the top to apply these settings
               </p>
             </div>
 
@@ -559,7 +540,10 @@ export default function Settings() {
           </div>
         </section>
 
-        {/* ═══ PAGE 7: HELP & LEGAL ═════════════ */}
+        {/* Magic Link Section */}
+        <MagicLinkSettings showToast={showToast} />
+
+        {/* Help & Legal */}
         <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="flex items-center gap-3 p-6 border-b border-slate-100">
             <div className="w-10 h-10 bg-slate-900 rounded-xl flex items-center justify-center">
@@ -606,7 +590,6 @@ export default function Settings() {
                 </a>
               ))}
 
-              {/* Sign out */}
               <button
                 onClick={() => { logout(); localStorage.clear(); window.location.href = "/login" }}
                 className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl
@@ -624,29 +607,26 @@ export default function Settings() {
               </button>
             </div>
 
-            {/* AI data note */}
             <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 flex gap-3">
               <Shield size={18} className="text-blue-600 flex-shrink-0 mt-0.5" />
               <div>
                 <p className="font-bold text-sm text-blue-800">How we use your data</p>
                 <p className="text-xs text-blue-700 mt-1 leading-relaxed">
-                  Your lead data is processed <strong>only to generate scores for your brokerage</strong>.
-                  We never sell, share, or use it for advertising. All data is encrypted at rest (AES-256)
-                  and in transit (TLS 1.3). Compliant with Indian IT Act 2000, GDPR (EU clients),
-                  and Kerala state data protection guidelines. You can request full deletion at any time.
+                  Your lead data is processed only to generate scores for your brokerage.
+                  We never sell, share, or use it for advertising. All data is encrypted at rest and in transit.
+                  You can request full deletion at any time.
                 </p>
               </div>
             </div>
 
-            {/* Danger zone */}
             <div className="border-2 border-red-200 bg-red-50 rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-2">
                 <AlertTriangle size={18} className="text-red-600" />
                 <h3 className="font-black text-red-800 text-sm uppercase tracking-widest">Danger Zone</h3>
               </div>
               <p className="text-red-600 text-xs mb-4 leading-relaxed">
-                Permanently delete your account and all data — leads, scores, referrals, billing history.
-                <strong> This cannot be undone. No refunds for unused subscription time.</strong>
+                Permanently delete your account and all data.
+                <strong> This cannot be undone.</strong>
               </p>
               <button onClick={() => setShowDeleteModal(true)}
                 className="flex items-center gap-2 bg-white text-red-600 border-2 border-red-200
@@ -688,8 +668,7 @@ export default function Settings() {
                         font-mono text-xs break-all flex-1">{value}</p>
                       <button
                         onClick={() => { navigator.clipboard.writeText(value); showToast("success", "Copied!") }}
-                        className="text-slate-400 hover:text-white p-2 transition-colors flex-shrink-0"
-                        title="Copy">
+                        className="text-slate-400 hover:text-white p-2 transition-colors flex-shrink-0">
                         📋
                       </button>
                     </div>
@@ -717,13 +696,7 @@ export default function Settings() {
             </div>
 
             <div className="bg-red-50 border border-red-200 rounded-2xl p-4 mb-5 text-sm text-red-700">
-              This will permanently delete:
-              <ul className="mt-2 space-y-1 text-xs list-disc list-inside">
-                <li>All lead scores and history</li>
-                <li>All referrals and earned credits</li>
-                <li>Your brokerage profile</li>
-                <li>Active subscription (no refund)</li>
-              </ul>
+              This will permanently delete all your leads, scores, referrals, and subscription.
             </div>
 
             <div className="mb-5">
@@ -760,3 +733,157 @@ export default function Settings() {
     </div>
   )
 }
+
+// ─────────────────────────────────────────────
+// Magic Link Settings Component
+// ─────────────────────────────────────────────
+function MagicLinkSettings({ showToast }: { showToast: (type: "success" | "error" | "warning", msg: string) => void }) {
+  const API2 = import.meta.env.VITE_API_URL || "https://api.leadrankerai.com"
+  const token = localStorage.getItem("token")
+  const [slug, setSlug] = useState("")
+  const [waNumber, setWaNumber] = useState("")
+  const [currentSlug, setCurrentSlug] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API2}/api/v1/public/magic-link/settings`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.slug) { setSlug(d.slug); setCurrentSlug(d.slug) }
+        if (d.whatsapp_number) setWaNumber(d.whatsapp_number)
+      })
+      .catch(() => {})
+  }, [])
+
+  const magicUrl = currentSlug ? `https://app.leadrankerai.com/s/${currentSlug}` : null
+
+  const save = async () => {
+    if (!slug.trim()) return
+    setSaving(true)
+    try {
+      const res = await fetch(`${API2}/api/v1/public/magic-link/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ slug: slug.trim(), whatsapp_number: waNumber.trim() || null })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "Failed to save")
+      setCurrentSlug(slug.trim())
+      showToast("success", "Magic Link saved! Share it anywhere.")
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to save")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const copy = () => {
+    if (!magicUrl) return
+    navigator.clipboard.writeText(magicUrl)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="flex items-center gap-3 p-6 border-b border-slate-100">
+        <div className="w-10 h-10 bg-cyan-600 rounded-xl flex items-center justify-center">
+          <span className="text-white text-lg">🔗</span>
+        </div>
+        <div>
+          <h2 className="font-bold text-slate-800 text-lg">Magic Link</h2>
+          <p className="text-xs text-slate-500">Share your personal link — no website needed</p>
+        </div>
+      </div>
+
+      <div className="p-6 space-y-5">
+
+        <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-4">
+          <p className="text-sm text-cyan-800 font-medium mb-1">How it works</p>
+          <p className="text-xs text-cyan-700">
+            Share your Magic Link on WhatsApp status, Instagram bio, or Facebook.
+            Buyers fill a simple form → AI scores them instantly → you get an email alert.
+            No website or plugin needed.
+          </p>
+        </div>
+
+        <div>
+          <label className="text-sm font-semibold text-slate-700 block mb-2">
+            Your Link Name *
+          </label>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-slate-400 whitespace-nowrap">app.leadrankerai.com/s/</span>
+            <input
+              type="text"
+              value={slug}
+              onChange={e => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+              placeholder="your-name"
+              className="flex-1 min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-cyan-400"
+            />
+          </div>
+          <p className="text-xs text-slate-400 mt-1">Only letters, numbers, hyphens. e.g. jacob-thomas</p>
+        </div>
+
+        <div>
+          <label className="text-sm font-semibold text-slate-700 block mb-2">
+            WhatsApp Number <span className="text-slate-400 font-normal">(for alerts)</span>
+          </label>
+          <input
+            type="tel"
+            value={waNumber}
+            onChange={e => setWaNumber(e.target.value)}
+            placeholder="e.g. 919876543210 (with country code)"
+            className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-cyan-400"
+          />
+        </div>
+
+        <button
+          onClick={save}
+          disabled={saving || !slug.trim()}
+          className="w-full py-3 bg-cyan-600 text-white rounded-2xl font-bold text-sm hover:bg-cyan-700 disabled:opacity-50 transition-all"
+        >
+          {saving ? "Saving..." : "Save Magic Link"}
+        </button>
+
+        {magicUrl && (
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Your Magic Link</p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs text-cyan-600 bg-white border border-slate-200 rounded-lg px-3 py-2 truncate">
+                {magicUrl}
+              </code>
+              <button
+                onClick={copy}
+                className="px-3 py-2 bg-slate-900 text-white text-xs rounded-lg font-bold hover:bg-slate-700 transition-all whitespace-nowrap"
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <a
+                href={`https://wa.me/?text=Hi! Submit your inquiry here and I will get back to you: ${encodeURIComponent(magicUrl)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 py-2 bg-green-600 text-white text-xs rounded-xl font-bold text-center hover:bg-green-700 transition-all"
+              >
+                Share on WhatsApp
+              </a>
+              <a
+                href={magicUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 py-2 bg-slate-100 text-slate-700 text-xs rounded-xl font-bold text-center hover:bg-slate-200 transition-all"
+              >
+                Preview Form
+              </a>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
