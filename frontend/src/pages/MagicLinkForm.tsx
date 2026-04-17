@@ -84,8 +84,14 @@ export default function MagicLinkForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form)
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || "Submission failed")
+    const data = await res.json()
+     if (!res.ok) {
+     const errMsg = Array.isArray(data.detail)
+     ? data.detail[0]?.msg || "Please check your inputs"
+    : data.detail || "Submission failed"
+    throw new Error(errMsg)
+}
+
       setResult(data)
       setSubmitted(true)
       // Redirect to portal after 1 second
@@ -95,10 +101,10 @@ export default function MagicLinkForm() {
         }, 1500)
       }
     } catch (err: any) {
-      setError(err.message || "Something went wrong. Please try again.")
-    } finally {
-      setSubmitting(false)
-    }
+    const msg = typeof err === "string" ? err
+    : err?.message || "Something went wrong. Please try again."
+    setError(msg)
+}
   }
 
   const questions = INDUSTRY_QUESTIONS[profile?.industry || "default"] || INDUSTRY_QUESTIONS.default
@@ -238,7 +244,7 @@ export default function MagicLinkForm() {
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Rahul Kumar"
+                  placeholder="e.g. Nandu Prasad"
                   value={form.name}
                   onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                   required
@@ -257,7 +263,7 @@ export default function MagicLinkForm() {
                 </label>
                 <input
                   type="tel"
-                  placeholder="e.g. 9876543210"
+                  placeholder="e.g. 7994072017"
                   value={form.phone}
                   onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
                   required
