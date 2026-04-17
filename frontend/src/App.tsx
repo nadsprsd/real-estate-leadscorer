@@ -15,7 +15,10 @@ import ResetPassword  from "./pages/ResetPassword"
 import OAuthSuccess   from "./pages/OAuthSuccess"
 import TermsOfService from "./pages/TermsOfService"
 import PrivacyPolicy  from "./pages/PrivacyPolicy"
-import LeadPortal     from "./pages/LeadPortal"   // ← PUBLIC: leads land here, no login needed
+import LeadPortal     from "./pages/LeadPortal"   // ← PUBLIC: leads land 
+// here, no login needed
+
+import MagicLinkForm from "./pages/MagicLinkForm"
 
 // Protected pages
 import Dashboard         from "./pages/Dashboard"
@@ -27,6 +30,7 @@ import ConnectionsDetail from "./pages/ConnectionsDetail"
 
 import MainLayout from "./layouts/MainLayout"
 import Ranky      from "./components/Ranky"
+
 
 // ── Protected route wrapper ────────────────────────────────────────────────
 // Ranky is rendered HERE — so it only appears when the user is logged in,
@@ -68,6 +72,7 @@ export default function App() {
         <Route path="/portal"          element={<LeadPortal />} />
         <Route path="/terms"           element={<TermsOfService />} />
         <Route path="/privacy"         element={<PrivacyPolicy />} />
+        <Route path="/s/:slug" element={<MagicLinkForm />} />
 
         {/* ── PROTECTED — must be logged in ─────────────────────────── */}
         {/* Ranky bubble appears on ALL of these pages automatically     */}
